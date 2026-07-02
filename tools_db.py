@@ -294,18 +294,28 @@ def set_database_connection():
 
 
 def check_db_connection():
-    """Check database connection. Reconnect if needed"""
+    """Check database connection. Reconnect if needed.
+
+    Returns:
+        tuple: (connection_open, was_reconnected) — was_reconnected is True when the
+        connection had dropped and QSql was reopened successfully.
+    """
     global dao
     opened = True
+    reconnected = False
     try:
+        if dao is None:
+            return False, False
         was_closed = dao.check_connection()
         if was_closed:
             msg = "Database connection was closed and reconnected"
             tools_log.log_warning(msg)
+            reconnected = True
             opened = lib_vars.qgis_db_credentials.open()
             if not opened:
+                reconnected = False
                 msg = lib_vars.qgis_db_credentials.lastError().databaseText()
-                msg = "Database connection error ({0    }): {1}"
+                msg = "Database connection error ({0}): {1}"
                 msg_params = (
                     "QSqlDatabase",
                     msg,
@@ -318,7 +328,8 @@ def check_db_connection():
             e,
         )
         tools_log.log_warning(msg, msg_params=msg_params)
-    return opened
+        return False, False
+    return opened, reconnected
 
 
 def get_pg_version():
