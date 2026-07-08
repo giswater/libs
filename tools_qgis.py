@@ -1671,6 +1671,44 @@ def get_locale_schema():
     return locale
 
 
+def get_ui_language_locale():
+    """Return UI language for Python .qm files from utils_language_ui when available."""
+    locale = None
+    try:
+        from . import tools_db
+
+        schema_name = lib_vars.schema_name
+        if schema_name:
+            schema_name = schema_name.replace('"', "").strip()
+        param_table = None
+        if schema_name and tools_db.check_table("config_param_user", schemaname=schema_name):
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema_name):
+                param_table = f"{schema_name}.config_param_user"
+            else:
+                param_table = f'"{schema_name.replace(chr(34), chr(34) * 2)}".config_param_user'
+        if param_table and tools_db.check_schema("multilang"):
+            row = tools_db.get_row(
+                f"SELECT value FROM {param_table} "
+                "WHERE parameter = 'utils_language_ui' AND cur_user = current_user",
+                log_info=False,
+            )
+            if row and row[0]:
+                import json
+
+                data = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                if isinstance(data, dict) and data.get("lang") is not None and len(data.get("lang")) == 5:
+                    locale = data.get("lang")
+    except Exception as e:
+        msg = "Error getting UI language locale: {0}"
+        tools_log.log_info(msg, msg_params=(e,))
+
+    if not locale:
+        locale = get_locale_schema()
+    if locale in (None, ""):
+        locale = "en_US"
+    return locale
+
+
 def highlight_features_by_id(qtable, layer_name, field_id, rubber_band, width, selected, deselected):
     rubber_band.reset()
     for idx, index in enumerate(qtable.selectionModel().selectedRows()):

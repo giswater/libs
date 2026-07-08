@@ -1943,8 +1943,7 @@ def create_datetime(object_name, allow_null=True, set_cal_popup=True, display_fo
 
 def _add_translator(log_info=False):
     """Add translation file to the list of translation files to be used for translations"""
-    # Get locale of QGIS application
-    locale = tools_qgis.get_locale_schema()
+    locale = tools_qgis.get_ui_language_locale()
 
     locale_path = os.path.join(lib_vars.plugin_dir, "i18n", f"{lib_vars.plugin_name.lower()}_{locale}.qm")
     if not os.path.exists(locale_path):
