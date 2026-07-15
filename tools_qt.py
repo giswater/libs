@@ -656,26 +656,26 @@ def fill_combo_values(  # noqa: C901
             elem.append(row[x])
         records.append(elem)
 
-    combo.blockSignals(True)
-    if combo_clear:
-        combo.clear()
-    records_sorted = records
-
+    signals_blocked = combo.blockSignals(True)
     try:
-        if sort_combo:
-            records_sorted = sorted(records, key=operator.itemgetter(sort_by))
-    except Exception:
-        pass
-    finally:
+        if combo_clear:
+            combo.clear()
+        records_sorted = records
+        try:
+            if sort_combo:
+                records_sorted = sorted(records, key=operator.itemgetter(sort_by))
+        except Exception:
+            pass
         if add_empty:
             records_sorted.insert(0, ["", ""])
 
         for record in records_sorted:
             combo.addItem(str(record[index_to_show]), record)
-            combo.blockSignals(False)
 
-    if None not in (selected_id, index_to_compare):
-        set_combo_value(combo, selected_id, index_to_compare)
+        if None not in (selected_id, index_to_compare):
+            set_combo_value(combo, selected_id, index_to_compare)
+    finally:
+        combo.blockSignals(signals_blocked)
 
 
 def set_combo_item_unselectable_by_id(qcombo, list_id=None):
