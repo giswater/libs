@@ -48,6 +48,13 @@ def _credentials_conn_string(credentials, connect_timeout=None):
         conn_string = f"service={service}"
         if sslmode:
             conn_string += f" sslmode={sslmode}"
+        # libpq does not see QgsCredentials; pass explicit auth when available
+        user = credentials.get("user")
+        password = credentials.get("password")
+        if user not in (None, ""):
+            conn_string += f" user='{user}'"
+        if password is not None:
+            conn_string += f" password={password}"
         return conn_string + timeout_part
 
     host = credentials.get("host") or "localhost"
@@ -62,6 +69,61 @@ def _credentials_conn_string(credentials, connect_timeout=None):
     if password is not None:
         conn_string += f" password={password}"
     return conn_string + timeout_part
+
+
+def is_db_auth_error(error) -> bool:
+    """True when libpq/psycopg2 failed due to missing or rejected credentials."""
+    text = str(error or "").lower()
+    if not text:
+        return False
+    markers = (
+        "fe_sendauth",
+        "no password supplied",
+        "password authentication failed",
+        "authentication failed",
+        "peer authentication failed",
+        "auth failed",
+    )
+    return any(m in text for m in markers)
+
+
+def ensure_service_auth(credentials):
+    """
+    For pg_service connections missing user/password, prompt via QgsCredentials
+    on the calling (main) thread and put auth into @credentials.
+
+    Returns (ok, credentials). ok is False if the user cancelled or auth failed.
+    """
+    if not credentials or not credentials.get("service"):
+        return True, credentials
+
+    service = credentials["service"]
+    pg_creds = tools_os.manage_pg_service(service)
+    user = credentials.get("user") or pg_creds.get("user")
+    password = credentials.get("password") if credentials.get("password") is not None else pg_creds.get("password")
+
+    if user not in (None, "") and password is not None:
+        credentials["user"] = user
+        credentials["password"] = password
+        return True, credentials
+
+    conn_info = f"service='{service}'"
+    (success, user, password) = QgsCredentials.instance().get(
+        conn_info,
+        user,
+        password,
+        f"Please enter the credentials for connection '{service}'",
+    )
+    if not success or user in (None, ""):
+        lib_vars.session_vars["last_error"] = tools_qt.tr(
+            "Database connection error. Please check your connection parameters."
+        )
+        return False, credentials
+
+    QgsCredentials.instance().put(conn_info, user, password)
+    credentials["user"] = user
+    credentials["password"] = password
+    return True, credentials
 
 
 def ping_database(credentials, timeout_sec=None):
@@ -443,10 +505,8 @@ def connect_to_database_service(service, sslmode=None, conn_info=None):
 
     # Get credentials from .pg_service.conf
     credentials = tools_os.manage_pg_service(service)
-    if all([credentials["host"], credentials["port"], credentials["dbname"]]) and None in [
-        credentials["user"],
-        credentials["password"],
-    ]:
+    has_params = all([credentials["host"], credentials["port"], credentials["dbname"]])
+    if has_params and None in [credentials["user"], credentials["password"]]:
         if conn_info is None:
             conn_info = f"service='{service}'"
         (success, credentials["user"], credentials["password"]) = QgsCredentials.instance().get(
@@ -455,46 +515,54 @@ def connect_to_database_service(service, sslmode=None, conn_info=None):
             credentials["password"],
             f"Please enter the credentials for connection '{service}'",
         )
-
+        if not success:
+            lib_vars.session_vars["last_error"] = tools_qt.tr(
+                "Database connection error. Please check your connection parameters."
+            )
+            return False, credentials
         # Put the credentials back (for yourself and the provider), as QGIS removes it when you "get" it
         QgsCredentials.instance().put(conn_info, credentials["user"], credentials["password"])
 
-    if credentials:
+    if has_params and credentials["user"] not in (None, "") and credentials["password"] is not None:
         status = connect_to_database(
             credentials["host"],
             credentials["port"],
             credentials["dbname"],
             credentials["user"],
             credentials["password"],
-            credentials["sslmode"],
+            credentials["sslmode"] or sslmode,
         )
-    else:
-        # Try to connect using name defined in service file
-        # QSqlDatabase connection
-        lib_vars.qgis_db_credentials = QSqlDatabase.addDatabase("QPSQL", lib_vars.plugin_name)
-        lib_vars.qgis_db_credentials.setConnectOptions(
-            conn_string + f" connect_timeout={get_db_connect_timeout()}"
-        )
-        status = lib_vars.qgis_db_credentials.open()
-        if not status:
-            msg = "Service database connection error (QSqlDatabase). Please open plugin log file to get more details"
-            lib_vars.session_vars["last_error"] = tools_qt.tr(msg)
-            details = lib_vars.qgis_db_credentials.lastError().databaseText()
-            tools_log.log_warning(str(details))
-            return False, credentials
+        return status, credentials
 
-        # psycopg2 connection
-        dao = tools_pgdao.GwPgDao()
-        dao.set_conn_string(conn_string, connect_timeout=get_db_connect_timeout())
-        status = dao.init_db()
-        msg = "PostgreSQL PID: {0}"
-        msg_params = (dao.pid,)
-        tools_log.log_info(msg, msg_params=msg_params)
-        if not status:
-            msg = "Service database connection error (psycopg2). Please open plugin log file to get more details"
-            lib_vars.session_vars["last_error"] = tools_qt.tr(msg)
-            tools_log.log_warning(str(dao.last_error))
-            return False, credentials
+    # Fallback: connect using libpq service= resolution (may still need user/password)
+    if credentials.get("user") not in (None, ""):
+        conn_string += f" user='{credentials['user']}'"
+    if credentials.get("password") is not None:
+        conn_string += f" password={credentials['password']}"
+
+    lib_vars.qgis_db_credentials = QSqlDatabase.addDatabase("QPSQL", lib_vars.plugin_name)
+    lib_vars.qgis_db_credentials.setConnectOptions(
+        conn_string + f" connect_timeout={get_db_connect_timeout()}"
+    )
+    status = lib_vars.qgis_db_credentials.open()
+    if not status:
+        msg = "Service database connection error (QSqlDatabase). Please open plugin log file to get more details"
+        lib_vars.session_vars["last_error"] = tools_qt.tr(msg)
+        details = lib_vars.qgis_db_credentials.lastError().databaseText()
+        tools_log.log_warning(str(details))
+        return False, credentials
+
+    dao = tools_pgdao.GwPgDao()
+    dao.set_conn_string(conn_string, connect_timeout=get_db_connect_timeout())
+    status = dao.init_db()
+    msg = "PostgreSQL PID: {0}"
+    msg_params = (dao.pid,)
+    tools_log.log_info(msg, msg_params=msg_params)
+    if not status:
+        msg = "Service database connection error (psycopg2). Please open plugin log file to get more details"
+        lib_vars.session_vars["last_error"] = tools_qt.tr(msg)
+        tools_log.log_warning(str(dao.last_error))
+        return False, credentials
 
     return status, credentials
 
