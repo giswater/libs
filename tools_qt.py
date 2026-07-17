@@ -692,7 +692,7 @@ def fill_combo_values(  # noqa: C901
                 for record in records_sorted:
                     if not record:
                         continue
-                    row_id = '' if record[0] is None else str(record[0])
+                    row_id = "" if record[0] is None else str(record[0])
                     if index_to_show < len(record):
                         idval = str(record[index_to_show])
                     else:
