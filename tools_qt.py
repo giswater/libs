@@ -161,7 +161,11 @@ class GwEditDialog(QDialog):
         elif widget_type == "QTextEdit":
             self.widget = QTextEdit(self)
         elif widget_type == "QComboBox":
-            self.widget = QComboBox(self)
+            try:
+                from ..core.utils.async_combo import GwAsyncComboBox
+                self.widget = GwAsyncComboBox(self)
+            except ImportError:
+                self.widget = QComboBox(self)
             if options:
                 try:
                     self.widget.addItems(options)
@@ -681,6 +685,26 @@ def fill_combo_values(  # noqa: C901
     finally:
         if add_empty:
             records_sorted.insert(0, ["", ""])
+
+        if getattr(combo, "_gw_is_async_combo", False) and hasattr(combo, "apply_rows"):
+            combo.blockSignals(True)
+            try:
+                rows = []
+                for record in records_sorted:
+                    if not record:
+                        continue
+                    row_id = '' if record[0] is None else str(record[0])
+                    if index_to_show < len(record):
+                        idval = str(record[index_to_show])
+                    else:
+                        idval = row_id
+                    rows.append((row_id, idval))
+                combo.apply_rows(rows)
+            finally:
+                combo.blockSignals(False)
+            if None not in (selected_id, index_to_compare):
+                set_combo_value(combo, selected_id, index_to_compare)
+            return
 
         for record in records_sorted:
             combo.addItem(str(record[index_to_show]), record)
@@ -1295,7 +1319,11 @@ def add_combo_on_tableview(qtable, rows, field, widget_pos, combo_values):
     :return:
     """
     for x in range(0, len(rows)):
-        combo = QComboBox()
+        try:
+            from ..core.utils.async_combo import GwAsyncComboBox
+            combo = GwAsyncComboBox()
+        except ImportError:
+            combo = QComboBox()
         row = rows[x]
         # Populate QComboBox
         fill_combo_values(combo, combo_values)
