@@ -9,6 +9,7 @@ import configparser
 import re
 from functools import partial
 from typing import Optional
+from warnings import warn
 
 import console
 import os.path
@@ -52,6 +53,7 @@ from qgis.core import (
     QgsPrintLayout,
     Qgis,
     NULL,
+    QgsMapLayer,
 )
 from qgis.utils import iface, plugin_paths, available_plugins, active_plugins
 
@@ -523,9 +525,12 @@ def get_plugin_version():
 
 
 def get_major_version(plugin_dir=None, default_version="3.5"):
-    """Get plugin higher version from metadata.txt file"""
-    major_version = get_plugin_metadata("version", default_version, plugin_dir)[0:3]
-    return major_version
+    """Return major.minor folder name (e.g. 4.10) from metadata.txt version."""
+    version = get_plugin_metadata("version", default_version, plugin_dir)
+    parts = version.split(".")
+    if len(parts) >= 2:
+        return f"{parts[0]}.{parts[1]}"
+    return parts[0] if parts else default_version
 
 
 def get_build_version(plugin_dir, default_version="35001"):
@@ -798,7 +803,51 @@ def get_layer_by_tablename(tablename, show_warning_=False, log_info=False, schem
             tools_log.log_info(msg, parameter=tablename)
         elif not layer.isValid():
             msg = "Layer is broken"
+
+    return layer
+
+
+def get_layer(
+    custom_properties=None, tablename=None, layername=None, schema_name=None, show_warning_=False, log_info=False
+):
+    """
+    Iterate over all layers and get the one with selected @custom_properties, @tablename or @layername
+    :param custom_properties: Dictionary of custom properties to match (dict)
+    :param tablename: Table name to match (string)
+    :param layername: Layer name to match (string)
+    :param schema_name: Schema name to match (string)
+    :param show_warning_: Show warning if layer is not found (bool)
+    :param log_info: Log info if layer is not found (bool)
+    """
+    # Check if we have any layer loaded
+    layers = get_project_layers()
+    if len(layers) == 0:
+        return None
+
+    layer = None
+
+    layer = _manage_custom_properties(layers, custom_properties)
+
+    if layer is None and tablename is not None:
+        layer = get_layer_by_tablename(
+            tablename, show_warning_=show_warning_, log_info=log_info, schema_name=schema_name
+        )
+
+    if layer is None and layername is not None:
+        layer = get_layer_by_layername(layername, log_info=log_info)
+
+    if show_warning_:
+        if layer is None:
+            show_warning("Layer not found", parameter=tablename)
+        elif not layer.isValid():
+            show_warning("Layer is broken", parameter=tablename)
+
+    if log_info:
+        if layer is None:
+            msg = "Layer not found"
             tools_log.log_info(msg, parameter=tablename)
+        elif not layer.isValid():
+            msg = "Layer is broken"
 
     return layer
 
@@ -812,14 +861,24 @@ def find_matching_layer(layers, tablename, schema_name):
     return None
 
 
-def add_layer_to_toc(layer, group=None, sub_group=None, create_groups=False, sub_sub_group=None):
+def add_layer_to_toc(
+    layer, group=None, sub_group=None, create_groups=False, sub_sub_group=None, custom_properties=None
+):
     """If the function receives a group name, check if it exists or not and put the layer in this group
     :param layer: (QgsVectorLayer)
     :param group: Name of the group that will be created in the toc (string)
+    :param sub_group: Name of the sub-group that will be created in the toc (string)
+    :param create_groups: Create groups if they do not exist (boolean)
+    :param sub_sub_group: Name of the sub-sub-group that will be created in the toc (string)
+    :param custom_properties: Custom properties of the layer (dict)
     """
     if group is None:
         QgsProject.instance().addMapLayer(layer)
         return
+
+    if custom_properties is not None:
+        for key, value in custom_properties.items():
+            layer.setCustomProperty(key, value)
 
     QgsProject.instance().addMapLayer(layer, False)
     root = QgsProject.instance().layerTreeRoot()
@@ -1280,29 +1339,45 @@ def remove_layer_from_toc(layer_name, group_name, sub_group=None):
     :param layer_name: Name's layer (String)
     :param group_name: Name's group (String)
     """
-    layer = None
-    for lyr in list(QgsProject.instance().mapLayers().values()):
-        if lyr.name() == layer_name:
-            layer = lyr
-            break
+    warn("remove_layer_from_toc is deprecated. Use remove_layer instead.", stacklevel=2)
+    remove_layer(layername=layer_name, group_name=group_name, sub_group=sub_group)
+
+
+def remove_layer(custom_properties=None, tablename=None, layername=None, group_name=None, sub_group=None):
+    """
+    Remove layer from toc if exist
+    :param custom_properties: Custom properties of the layer (dict)
+    :param tablename: Tablename of the layer (String)
+    :param layername: Layername of the layer (String)
+    :param group_name: Name's group (String)
+    :param sub_group: Name's sub group (String)
+    """
+    layer = get_layer(custom_properties=custom_properties, tablename=tablename, layername=layername)
     if layer is not None:
         # Remove layer
         QgsProject.instance().removeMapLayer(layer)
 
         # Remove group if is void
-        root = QgsProject.instance().layerTreeRoot()
-        first_group = root.findGroup(group_name)
-        if first_group:
-            if sub_group:
-                second_group = first_group.findGroup(sub_group)
-                if second_group:
-                    layers = second_group.findLayers()
-                    if not layers:
-                        root.removeChildNode(second_group)
-            layers = first_group.findLayers()
-            if not layers:
-                root.removeChildNode(first_group)
-        remove_layer_from_toc(layer_name, group_name)
+        if group_name is not None:
+            root = QgsProject.instance().layerTreeRoot()
+            first_group = root.findGroup(group_name)
+            if first_group:
+                if sub_group:
+                    second_group = first_group.findGroup(sub_group)
+                    if second_group:
+                        layers = second_group.findLayers()
+                        if not layers:
+                            root.removeChildNode(second_group)
+                layers = first_group.findLayers()
+                if not layers:
+                    root.removeChildNode(first_group)
+        remove_layer(
+            custom_properties=custom_properties,
+            tablename=tablename,
+            layername=layername,
+            group_name=group_name,
+            sub_group=sub_group,
+        )
 
     # Force a map refresh
     force_refresh_map_canvas()
@@ -1596,6 +1671,44 @@ def get_locale_schema():
     return locale
 
 
+def get_ui_language_locale():
+    """Return UI language for Python .qm files from utils_language_ui when available."""
+    locale = None
+    try:
+        from . import tools_db
+
+        schema_name = lib_vars.schema_name
+        if schema_name:
+            schema_name = schema_name.replace('"', "").strip()
+        param_table = None
+        if schema_name and tools_db.check_table("config_param_user", schemaname=schema_name):
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema_name):
+                param_table = f"{schema_name}.config_param_user"
+            else:
+                param_table = f'"{schema_name.replace(chr(34), chr(34) * 2)}".config_param_user'
+        if param_table and tools_db.check_schema("multilang"):
+            row = tools_db.get_row(
+                f"SELECT value FROM {param_table} "
+                "WHERE parameter = 'utils_language_ui' AND cur_user = current_user",
+                log_info=False,
+            )
+            if row and row[0]:
+                import json
+
+                data = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                if isinstance(data, dict) and data.get("lang") is not None and len(data.get("lang")) == 5:
+                    locale = data.get("lang")
+    except Exception as e:
+        msg = "Error getting UI language locale: {0}"
+        tools_log.log_info(msg, msg_params=(e,))
+
+    if not locale:
+        locale = get_locale_schema()
+    if locale in (None, ""):
+        locale = "en_US"
+    return locale
+
+
 def highlight_features_by_id(qtable, layer_name, field_id, rubber_band, width, selected, deselected):
     rubber_band.reset()
     for idx, index in enumerate(qtable.selectionModel().selectedRows()):
@@ -1852,11 +1965,11 @@ def _create_group_structure(root, group, sub_group, sub_sub_group):
 
 def _add_layer_to_group(layer, first_group, second_group, third_group):
     """Add layer to the appropriate group level"""
-    if third_group:
+    if third_group is not None:
         third_group.insertLayer(0, layer)
-    elif second_group:
+    elif second_group is not None:
         second_group.insertLayer(0, layer)
-    elif first_group:
+    elif first_group is not None:
         first_group.insertLayer(0, layer)
     else:
         root = QgsProject.instance().layerTreeRoot()
@@ -1880,6 +1993,25 @@ def _manage_layer_source_dict(list_uri: list[tuple[str, str]]) -> dict[str, str]
             splt_dct["schema"], splt_dct["table"] = splt_dict_table
 
     return splt_dct
+
+
+def _manage_custom_properties(
+    layers: list[QgsMapLayer], custom_properties: Optional[dict[str, str]]
+) -> QgsMapLayer | None:
+    """Manage custom properties of the layer
+    :param layers: List of layers (list)
+    :param custom_properties: Custom properties of the layer (dict)
+    :return: Layer (QgsMapLayer)
+    """
+    layer = None
+    if custom_properties is not None:
+        for current_layer in layers:
+            if current_layer is None:
+                continue
+            if all(current_layer.customProperty(key) == value for key, value in custom_properties.items()):
+                layer = current_layer
+                break
+    return layer
 
 
 # endregion

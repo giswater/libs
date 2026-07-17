@@ -87,7 +87,7 @@ class GwPgDao(object):
             status = False
         return status
 
-    def set_params(self, host, port, dbname, user, password, sslmode):
+    def set_params(self, host, port, dbname, user, password, sslmode, connect_timeout=None):
         """Set database parameters"""
         self.host = host
         self.port = port
@@ -99,16 +99,28 @@ class GwPgDao(object):
             self.conn_string += f" sslmode={sslmode}"
         if self.password is not None:
             self.conn_string += f" password={self.password}"
+        self._append_connect_options(connect_timeout)
 
-    def set_conn_string(self, conn_string):
+    def set_conn_string(self, conn_string, connect_timeout=None):
         """Set connection string"""
         self.conn_string = conn_string
+        self._append_connect_options(connect_timeout)
 
-    def set_service(self, service, sslmode=None):
+    def set_service(self, service, sslmode=None, connect_timeout=None):
         """Set service"""
         self.conn_string = f"service={service}"
         if sslmode:
             self.conn_string += f" sslmode={sslmode}"
+        self._append_connect_options(connect_timeout)
+
+    def _append_connect_options(self, connect_timeout=None):
+        if connect_timeout is None:
+            from . import tools_db
+            connect_timeout = tools_db.get_db_connect_timeout()
+        self.conn_string += (
+            f" connect_timeout={int(connect_timeout)}"
+            f" keepalives=1 keepalives_idle=30"
+        )
 
     def mogrify(self, sql, params):
         """Return a query string after arguments binding"""
@@ -124,40 +136,46 @@ class GwPgDao(object):
         """Get multiple rows from selected query"""
         self.last_error = None
         rows = None
+        cursor = None
         try:
-            if aux_conn is not None:
-                cursor = self.get_cursor(aux_conn)
-                cursor.execute(sql)
-                rows = cursor.fetchall()
-            else:
-                self.cursor_execute(sql)
-                rows = self.cursor.fetchall()
+            cursor = self.get_cursor(aux_conn)
+            cursor.execute(sql)
+            rows = cursor.fetchall()
             if commit:
                 self.commit(aux_conn)
         except Exception as e:
             self.last_error = e
             if commit:
                 self.rollback(aux_conn)
+        finally:
+            if aux_conn is None and cursor is not None and cursor is not self.cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
         return rows
 
     def get_row(self, sql, commit=False, aux_conn=None):
         """Get single row from selected query"""
         self.last_error = None
         row = None
+        cursor = None
         try:
-            if aux_conn is not None:
-                cursor = self.get_cursor(aux_conn)
-                cursor.execute(sql)
-                row = cursor.fetchone()
-            else:
-                self.cursor_execute(sql)
-                row = self.cursor.fetchone()
+            cursor = self.get_cursor(aux_conn)
+            cursor.execute(sql)
+            row = cursor.fetchone()
             if commit:
                 self.commit(aux_conn)
         except Exception as e:
             self.last_error = e
             if commit:
                 self.rollback(aux_conn)
+        finally:
+            if aux_conn is None and cursor is not None and cursor is not self.cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
         return row
 
     def execute_sql(self, sql, commit=True, aux_conn=None):
