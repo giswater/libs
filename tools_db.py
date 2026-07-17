@@ -83,6 +83,8 @@ def is_db_auth_error(error) -> bool:
         "authentication failed",
         "peer authentication failed",
         "auth failed",
+        "sasl authentication requires a password",
+        "authentication requires a password",
     )
     return any(m in text for m in markers)
 
@@ -99,8 +101,8 @@ def ensure_service_auth(credentials):
 
     service = credentials["service"]
     pg_creds = tools_os.manage_pg_service(service)
-    user = credentials.get("user") or pg_creds.get("user")
-    password = credentials.get("password") if credentials.get("password") is not None else pg_creds.get("password")
+    user = credentials.get("user") if credentials.get("user") not in (None, "") else pg_creds.get("user")
+    password = credentials.get("password") if credentials.get("password") not in (None, "") else pg_creds.get("password")
 
     if user not in (None, "") and password is not None:
         credentials["user"] = user
