@@ -582,9 +582,18 @@ def get_combo_value(dialog, widget, index=0, add_quote=False):
     if widget:
         if isinstance(widget, QComboBox):
             current_index = widget.currentIndex()
+            if current_index < 0:
+                return value
             elem = widget.itemData(current_index)
+            if elem is None and getattr(widget, '_gw_is_async_combo', False):
+                model = widget.model()
+                if model is not None:
+                    model_index = model.index(current_index, 0)
+                    elem = model.data(model_index, Qt.ItemDataRole.UserRole)
             if index == -1:
                 return elem
+            if elem is None:
+                return value
             value = elem[index]
             if add_quote:
                 value = _handle_null_text(value, True, False)
@@ -615,6 +624,11 @@ def set_combo_value(combo, value, index, add_new=True):
 
     for i in range(0, combo.count()):
         elem = combo.itemData(i)
+        if elem is None and getattr(combo, '_gw_is_async_combo', False):
+            model = combo.model()
+            if model is not None:
+                model_index = model.index(i, 0)
+                elem = model.data(model_index, Qt.ItemDataRole.UserRole)
         if elem is not None and str(value) == str(elem[index]):
             combo.setCurrentIndex(i)
             return True
