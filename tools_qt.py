@@ -161,16 +161,9 @@ class GwEditDialog(QDialog):
         elif widget_type == "QTextEdit":
             self.widget = QTextEdit(self)
         elif widget_type == "QComboBox":
-            try:
-                from ..core.utils.async_combo import GwAsyncComboBox
-                self.widget = GwAsyncComboBox(self)
-            except ImportError:
-                self.widget = QComboBox(self)
+            self.widget = QComboBox(self)
             if options:
-                try:
-                    self.widget.addItems(options)
-                except Exception:
-                    fill_combo_values(self.widget, options)
+                fill_combo_values(self.widget, options)
         elif widget_type == "QCheckBox":
             self.widget = QCheckBox(self)
         else:
@@ -572,6 +565,17 @@ def filter_by_list(combobox, proxy_model, text):
         combobox.completer().popup().hide()
 
 
+def _combo_item_elem(combo, row_index):
+    """Return combo row data, including custom-model async combos."""
+    elem = combo.itemData(row_index)
+    if elem is None and getattr(combo, "_gw_is_async_combo", False):
+        model = combo.model()
+        if model is not None:
+            model_index = model.index(row_index, 0)
+            elem = model.data(model_index, Qt.ItemDataRole.UserRole)
+    return elem
+
+
 def get_combo_value(dialog, widget, index=0, add_quote=False):
     """Get item data of current index of the @widget"""
     value = -1
@@ -579,24 +583,22 @@ def get_combo_value(dialog, widget, index=0, add_quote=False):
         value = ""
     if type(widget) is str:
         widget = dialog.findChild(QWidget, widget)
-    if widget:
-        if isinstance(widget, QComboBox):
-            current_index = widget.currentIndex()
-            if current_index < 0:
-                return value
-            elem = widget.itemData(current_index)
-            if elem is None and getattr(widget, '_gw_is_async_combo', False):
-                model = widget.model()
-                if model is not None:
-                    model_index = model.index(current_index, 0)
-                    elem = model.data(model_index, Qt.ItemDataRole.UserRole)
-            if index == -1:
-                return elem
-            if elem is None:
-                return value
-            value = elem[index]
-            if add_quote:
-                value = _handle_null_text(value, True, False)
+    if not widget or not isinstance(widget, QComboBox):
+        return value
+
+    current_index = widget.currentIndex()
+    if current_index < 0:
+        return value
+
+    elem = _combo_item_elem(widget, current_index)
+    if index == -1:
+        return elem
+    if elem is None:
+        return value
+
+    value = elem[index]
+    if add_quote:
+        value = _handle_null_text(value, True, False)
 
     return value
 
@@ -611,10 +613,8 @@ def set_combo_value(combo, value, index, add_new=True):
     if combo is None:
         return False
 
-    # Async combos (GwAsyncComboBox) load their items in a background task.
-    # If the rows haven't arrived yet we record a pending selection and let
-    # the widget apply it as soon as the data is in. Detection is done by
-    # duck-typing to avoid pulling a core/utils import into libs.
+    # Async combos load in a background task. Duck-type `_gw_is_async_combo` /
+    # `set_pending_selection` so libs stays independent from core.
     if getattr(combo, "_gw_is_async_combo", False) and not combo.property("rows_loaded"):
         try:
             combo.set_pending_selection(value, index)
@@ -623,12 +623,7 @@ def set_combo_value(combo, value, index, add_new=True):
         return True
 
     for i in range(0, combo.count()):
-        elem = combo.itemData(i)
-        if elem is None and getattr(combo, '_gw_is_async_combo', False):
-            model = combo.model()
-            if model is not None:
-                model_index = model.index(i, 0)
-                elem = model.data(model_index, Qt.ItemDataRole.UserRole)
+        elem = _combo_item_elem(combo, i)
         if elem is not None and str(value) == str(elem[index]):
             combo.setCurrentIndex(i)
             return True
@@ -1333,11 +1328,7 @@ def add_combo_on_tableview(qtable, rows, field, widget_pos, combo_values):
     :return:
     """
     for x in range(0, len(rows)):
-        try:
-            from ..core.utils.async_combo import GwAsyncComboBox
-            combo = GwAsyncComboBox()
-        except ImportError:
-            combo = QComboBox()
+        combo = QComboBox()
         row = rows[x]
         # Populate QComboBox
         fill_combo_values(combo, combo_values)
