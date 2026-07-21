@@ -163,7 +163,10 @@ class GwEditDialog(QDialog):
         elif widget_type == "QComboBox":
             self.widget = QComboBox(self)
             if options:
-                fill_combo_values(self.widget, options)
+                if isinstance(options[0], str):
+                    self.widget.addItems(options)
+                else:
+                    fill_combo_values(self.widget, options)
         elif widget_type == "QCheckBox":
             self.widget = QCheckBox(self)
         else:
