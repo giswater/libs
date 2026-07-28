@@ -1958,18 +1958,12 @@ def _add_translator(log_info=False):
                 tools_log.log_info(msg, parameter=locale_path)
             return
 
-    if os.path.exists(locale_path):
-        translator.load(locale_path)
-        QCoreApplication.installTranslator(translator)
-        if log_info:
-            msg = "Add translator ({0})"
-            msg_params = (locale,)
-            tools_log.log_info(msg, parameter=locale_path, msg_params=msg_params)
-    else:
-        if log_info:
-            msg = "Locale not found ({0})"
-            msg_params = (locale,)
-            tools_log.log_info(msg, parameter=locale_path, msg_params=msg_params)
+    translator.load(locale_path)
+    QCoreApplication.installTranslator(translator)
+    if log_info:
+        msg = "Add translator ({0})"
+        msg_params = (locale,)
+        tools_log.log_info(msg, parameter=locale_path, msg_params=msg_params)
 
 
 def _translate_form(context_name, dialog, aux_context="ui_message"):
