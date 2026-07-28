@@ -1671,8 +1671,8 @@ def get_locale_schema():
     return locale
 
 
-def _locale_folder_from_lang_id(lang_id: str | None) -> str | None:
-    """Map multilang.cat_language / cat_user_lang id (ca_es) to QGIS locale (ca_ES)."""
+def _locale_folder_from_lang_id(lang_id) -> str | None:
+    """Map config_param_user id (ca_es) to QGIS locale (ca_ES)."""
     text = str(lang_id or "").strip().replace("-", "_")
     if not text or len(text) != 5:
         return None
@@ -1694,11 +1694,11 @@ def get_ui_language_locale():
         if schema_name and tools_db.check_schema("multilang"):
             schema_esc = schema_name.replace("'", "''")
             row = tools_db.get_row(
-                "SELECT lang FROM multilang.cat_user_lang "
-                f"WHERE schema_name = '{schema_esc}' AND username = current_user",
+                f"SELECT value FROM {schema_esc}.config_param_user "
+                "WHERE parameter = 'multilang_language' AND cur_user = current_user",
                 log_info=False,
             )
-            if row and row[0]:
+            if row and row[0] and str(row[0]).strip().lower() not in ("", "default"):
                 locale = _locale_folder_from_lang_id(row[0])
     except Exception as e:
         msg = "Error getting UI language locale: {0}"
