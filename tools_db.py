@@ -102,7 +102,11 @@ def ensure_service_auth(credentials):
     service = credentials["service"]
     pg_creds = tools_os.manage_pg_service(service)
     user = credentials.get("user") if credentials.get("user") not in (None, "") else pg_creds.get("user")
-    password = credentials.get("password") if credentials.get("password") not in (None, "") else pg_creds.get("password")
+    password = (
+        credentials.get("password")
+        if credentials.get("password") not in (None, "")
+        else pg_creds.get("password")
+    )
 
     if user not in (None, "") and password is not None:
         credentials["user"] = user

@@ -1671,7 +1671,7 @@ def get_locale_schema():
     return locale
 
 
-def _locale_folder_from_lang_id(lang_id) -> str | None:
+def _locale_folder_from_lang_id(lang_id) -> Optional[str]:
     """Map config_param_user id (ca_es) to QGIS locale (ca_ES)."""
     text = str(lang_id or "").strip().replace("-", "_")
     if not text or len(text) != 5:
