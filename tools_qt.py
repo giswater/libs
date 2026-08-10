@@ -1700,7 +1700,7 @@ def tr(message, context_name="giswater", aux_context="ui_message", default=None,
         value = _translate_line(str_message, context_name, aux_context)
 
     if value == str_message and default is not None:
-        value = default
+        value = tr(default)
 
     return _format_params(value, list_params)
 
