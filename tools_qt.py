@@ -170,7 +170,9 @@ class GwEditDialog(QDialog):
         elif widget_type == "QCheckBox":
             self.widget = QCheckBox(self)
         else:
-            raise ValueError("Unsupported widget type")
+            msg = "Unsupported widget type: {0}"
+            msg_params = (widget_type,)
+            raise ValueError(tr(msg, list_params=msg_params))
 
         self.layout.addWidget(self.widget, 1, 0, 1, 2)
 
