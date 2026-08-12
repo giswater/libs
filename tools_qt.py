@@ -1663,19 +1663,12 @@ def set_stylesheet(widget, style="border: 2px solid red"):
     widget.setStyleSheet(style)
 
 
-def _translate_line(line, context_name, aux_context):
-    """Translate a single line with fallback to aux_context."""
-    translated = QCoreApplication.translate(context_name, line)
-    if translated == line:
-        translated = QCoreApplication.translate(aux_context, line)
+def _translate_text(text, context_name, aux_context):
+    """Translate text as one unit (including embedded newlines) with aux_context fallback."""
+    translated = QCoreApplication.translate(context_name, text)
+    if translated == text:
+        translated = QCoreApplication.translate(aux_context, text)
     return translated
-
-
-def _translate_multiline(str_message, context_name, aux_context):
-    """Translate a multiline string by translating each line separately."""
-    lines = str_message.split("\n")
-    translated_lines = [_translate_line(line, context_name, aux_context) for line in lines]
-    return "\n".join(translated_lines)
 
 
 def _format_params(value, list_params):
@@ -1691,15 +1684,15 @@ def _format_params(value, list_params):
 
 
 def tr(message, context_name="giswater", aux_context="ui_message", default=None, list_params=None):
-    """Translate @message looking it in @context_name"""
+    """Translate @message looking it in @context_name.
+
+    The full string is one translation key, including any embedded newlines.
+    """
     if context_name is None:
         context_name = lib_vars.plugin_name
 
     str_message = str(message)
-    if "\n" in str_message:
-        value = _translate_multiline(str_message, context_name, aux_context)
-    else:
-        value = _translate_line(str_message, context_name, aux_context)
+    value = _translate_text(str_message, context_name, aux_context)
 
     if value == str_message and default is not None:
         value = tr(default)
