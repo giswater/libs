@@ -90,6 +90,10 @@ from .ui.ui_manager import ShowInfoUi
 translator = QTranslator()
 dlg_info = ShowInfoUi()
 
+# Number of rows sampled by QHeaderView to compute column widths on automatic resize modes.
+# Qt samples 1000 rows by default, which is too expensive on tables with many rows and columns
+RESIZE_CONTENTS_PRECISION = 25
+
 
 class GwExtendedQLabel(QLabel):
     clicked = pyqtSignal()
@@ -776,13 +780,19 @@ def set_tableview_config(
     stretch_last_section=True,
     sorting_enabled=True,
     selection_mode=QAbstractItemView.SelectionMode.ExtendedSelection,
+    resize_contents_precision=RESIZE_CONTENTS_PRECISION,
 ):
     """Set QTableView configurations"""
+    header = widget.horizontalHeader()
     widget.setSelectionBehavior(selection)
     widget.setSelectionMode(selection_mode)
-    widget.horizontalHeader().setSectionResizeMode(section_resize_mode)
-    widget.horizontalHeader().setStretchLastSection(stretch_last_section)
-    widget.horizontalHeader().setMinimumSectionSize(100)
+    # An automatic resize mode measures the cells of every row to size each column, and it does so
+    # again on every model or header change. Sampling a few rows keeps big tables responsive
+    if section_resize_mode in (QHeaderView.ResizeMode.ResizeToContents, QHeaderView.ResizeMode.Stretch):
+        header.setResizeContentsPrecision(resize_contents_precision)
+    header.setSectionResizeMode(section_resize_mode)
+    header.setStretchLastSection(stretch_last_section)
+    header.setMinimumSectionSize(100)
     widget.setEditTriggers(edit_triggers)
     widget.setSortingEnabled(sorting_enabled)
 
