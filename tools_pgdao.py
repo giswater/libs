@@ -7,6 +7,7 @@ or (at your option) any later version.
 # -*- coding: utf-8 -*-
 import psycopg2
 import psycopg2.extras
+from psycopg2 import extensions as _pg_ext
 
 
 class GwPgDao(object):
@@ -299,23 +300,19 @@ class GwPgDao(object):
     def check_connection(self):
         """Check database connection. Reconnect if needed.
 
-        Ping uses autocommit so SELECT 1 does not leave idle-in-transaction.
+        Do not toggle autocommit (fails if a transaction is already open).
+        Rollback the ping only when this call started the transaction.
         """
         was_closed = False
         try:
-            if self.conn is None or getattr(self.conn, "closed", True):
+            if self.conn is None or self.conn.closed:
                 raise psycopg2.OperationalError("connection closed")
-            old_autocommit = self.conn.autocommit
-            self.conn.autocommit = True
-            try:
-                with self.conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-                    cur.fetchone()
-            finally:
-                try:
-                    self.conn.autocommit = old_autocommit
-                except Exception:
-                    pass
+            in_trans = self.conn.info.transaction_status != _pg_ext.TRANSACTION_STATUS_IDLE
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            if not in_trans:
+                self.conn.rollback()
         except (psycopg2.OperationalError, psycopg2.InterfaceError):
             was_closed = True
             self.init_db()
