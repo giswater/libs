@@ -10,6 +10,9 @@ import psycopg2.extras
 
 
 class GwPgDao(object):
+    APP_NAME_DAO = "giswater-dao"
+    APP_NAME_AUX = "giswater-aux"
+
     def __init__(self):
         self.last_error = None
         self.set_search_path = None
@@ -20,6 +23,8 @@ class GwPgDao(object):
     def init_db(self):
         """Initializes database connection"""
         try:
+            if self.conn is not None and not getattr(self.conn, "closed", True):
+                self.close_db()
             self.conn = psycopg2.connect(self.conn_string)
             self.cursor = self.get_cursor()
             self.pid = self.conn.get_backend_pid()
@@ -31,19 +36,25 @@ class GwPgDao(object):
         return status
 
     def close_db(self):
-        """Close database connection"""
+        """Close this instance's connection only (this process)."""
         try:
-            status = True
             if self.cursor:
-                self.cursor.close()
+                try:
+                    self.cursor.close()
+                except Exception:
+                    pass
             if self.conn:
-                self.conn.close()
-            del self.cursor
-            del self.conn
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+            status = True
         except Exception as e:
             self.last_error = e
             status = False
-
+        self.cursor = None
+        self.conn = None
+        self.pid = None
         return status
 
     def get_cursor(self, aux_conn=None):
@@ -61,12 +72,10 @@ class GwPgDao(object):
 
     def check_cursor(self):
         """Check if cursor is closed"""
-        status = True
-        if self.cursor.closed:
+        if self.cursor is None or self.cursor.closed:
             self.reset_db()
-            status = not self.cursor.closed
-
-        return status
+            return self.cursor is not None and not self.cursor.closed
+        return True
 
     def cursor_execute(self, sql):
         """Check if cursor is closed before execution"""
@@ -120,7 +129,16 @@ class GwPgDao(object):
         self.conn_string += (
             f" connect_timeout={int(connect_timeout)}"
             f" keepalives=1 keepalives_idle=30"
+            f" application_name={self.APP_NAME_DAO}"
         )
+
+    def _conn_string_for_app(self, application_name):
+        """Same libpq string with a different application_name (this process only)."""
+        token = f"application_name={self.APP_NAME_DAO}"
+        replacement = f"application_name={application_name}"
+        if token in self.conn_string:
+            return self.conn_string.replace(token, replacement)
+        return f"{self.conn_string} {replacement}"
 
     def mogrify(self, sql, params):
         """Return a query string after arguments binding"""
@@ -243,9 +261,9 @@ class GwPgDao(object):
         # Create an auxiliary connection with the intention of being able to cancel processes of the main connection
         last_error = None
         try:
-            aux_conn = psycopg2.connect(self.conn_string)
+            aux_conn = psycopg2.connect(self._conn_string_for_app(self.APP_NAME_AUX))
             cursor = self.get_cursor(aux_conn)
-            cursor.execute(f"SELECT pg_cancel_backend({pid})")
+            cursor.execute(f"SELECT pg_cancel_backend({int(pid)})")
             status = True
             cursor.close()
             aux_conn.close()
@@ -258,34 +276,47 @@ class GwPgDao(object):
         return {"status": status, "last_error": last_error}
 
     def get_aux_conn(self):
+        """Open a short-lived extra connection for this process. None on failure."""
         try:
-            aux_conn = psycopg2.connect(self.conn_string)
+            aux_conn = psycopg2.connect(self._conn_string_for_app(self.APP_NAME_AUX))
             cursor = self.get_cursor(aux_conn)
             if self.set_search_path:
                 cursor.execute(self.set_search_path)
+                aux_conn.commit()
             return aux_conn
         except Exception as e:
-            last_error = e
-            status = False
-
-        return {"status": status, "last_error": last_error}
+            self.last_error = e
+            return None
 
     def delete_aux_con(self, aux_conn):
+        if aux_conn is None:
+            return
         try:
             aux_conn.close()
-            del aux_conn
-            return
         except Exception as e:
-            last_error = e
-            status = False
-        return {"status": status, "last_error": last_error}
+            self.last_error = e
 
     def check_connection(self):
-        """Check database connection. Reconnect if needed"""
+        """Check database connection. Reconnect if needed.
+
+        Ping uses autocommit so SELECT 1 does not leave idle-in-transaction.
+        """
         was_closed = False
         try:
-            self.cursor.execute("SELECT 1")
-        except psycopg2.OperationalError:
+            if self.conn is None or getattr(self.conn, "closed", True):
+                raise psycopg2.OperationalError("connection closed")
+            old_autocommit = self.conn.autocommit
+            self.conn.autocommit = True
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+            finally:
+                try:
+                    self.conn.autocommit = old_autocommit
+                except Exception:
+                    pass
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
             was_closed = True
             self.init_db()
         return was_closed

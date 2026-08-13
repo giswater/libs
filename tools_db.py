@@ -19,6 +19,9 @@ dao = None
 dao_db_credentials: dict[str, str] = None
 current_user = None
 DEFAULT_DB_CONNECT_TIMEOUT = 5
+APP_NAME_DAO = "giswater-dao"
+APP_NAME_QSQL = "giswater-qsql"
+APP_NAME_LAYER = "giswater-layer"
 
 
 def get_db_connect_timeout(default=None):
@@ -41,7 +44,10 @@ def _credentials_conn_string(credentials, connect_timeout=None):
     """Build a psycopg2 connection string from QGIS-style credentials."""
     if connect_timeout is None:
         connect_timeout = get_db_connect_timeout()
-    timeout_part = f" connect_timeout={int(connect_timeout)} keepalives=1 keepalives_idle=30"
+    timeout_part = (
+        f" connect_timeout={int(connect_timeout)} keepalives=1 keepalives_idle=30"
+        f" application_name={APP_NAME_DAO}"
+    )
     service = credentials.get("service")
     if service:
         sslmode = credentials.get("sslmode")
@@ -334,11 +340,35 @@ def get_srid(tablename, schemaname=None):
     return srid
 
 
+def close_plugin_db():
+    """Close this process's plugin dao + QSql only. Does not terminate other backends."""
+    global dao
+    if dao is not None:
+        try:
+            dao.close_db()
+        except Exception:
+            pass
+        dao = None
+    _remove_qsql_database()
+
+
+def _remove_qsql_database():
+    """Drop this process's named QSqlDatabase. Must clear Python refs first."""
+    name = lib_vars.plugin_name
+    lib_vars.qgis_db_credentials = None
+    if not name or not QSqlDatabase.contains(name):
+        return
+    db = QSqlDatabase.database(name)
+    if db.isValid() and db.isOpen():
+        db.close()
+    del db
+    QSqlDatabase.removeDatabase(name)
+
+
 def set_database_connection():
     """Set database connection"""
-    global dao
     global current_user
-    dao = None
+    close_plugin_db()
     lib_vars.session_vars["last_error"] = None
     lib_vars.session_vars["logged_status"] = False
     current_user = None
@@ -424,6 +454,8 @@ def connect_to_database(host, port, db, user, pwd, sslmode):
     # Update current user
     current_user = user
 
+    close_plugin_db()
+
     # QSqlDatabase connection for Table Views
     status = create_qsqldatabase_connection(host, port, db, user, pwd)
     if not status:
@@ -448,6 +480,7 @@ def connect_to_database(host, port, db, user, pwd, sslmode):
 
 def create_qsqldatabase_connection(host, port, db, user, pwd):
     # QSqlDatabase connection for Table Views
+    _remove_qsql_database()
     lib_vars.qgis_db_credentials = QSqlDatabase.addDatabase("QPSQL", lib_vars.plugin_name)
     lib_vars.qgis_db_credentials.setHostName(host)
     if port != "":
@@ -456,7 +489,7 @@ def create_qsqldatabase_connection(host, port, db, user, pwd):
     lib_vars.qgis_db_credentials.setUserName(user)
     lib_vars.qgis_db_credentials.setPassword(pwd)
     lib_vars.qgis_db_credentials.setConnectOptions(
-        f"connect_timeout={get_db_connect_timeout()}"
+        f"connect_timeout={get_db_connect_timeout()} application_name={APP_NAME_QSQL}"
     )
     status = lib_vars.qgis_db_credentials.open()
     if not status:
@@ -477,7 +510,6 @@ def reset_qsqldatabase_connection(dialog=iface):
     db = lib_vars.last_db_credentials["db"]
     user = lib_vars.last_db_credentials["user"]
     pwd = lib_vars.last_db_credentials["pwd"]
-    QSqlDatabase.removeDatabase(lib_vars.plugin_name)
     create_qsqldatabase_connection(host, port, db, user, pwd)
     msg = "Database connection reset, please try again"
     tools_qgis.show_warning(msg, dialog=dialog)
@@ -505,6 +537,7 @@ def connect_to_database_service(service, sslmode=None, conn_info=None):
     This service must exist in file pg_service.conf
     """
     global dao
+    close_plugin_db()
     conn_string = f"service='{service}'"
     if sslmode:
         conn_string += f" sslmode={sslmode}"
@@ -546,9 +579,10 @@ def connect_to_database_service(service, sslmode=None, conn_info=None):
     if credentials.get("password") is not None:
         conn_string += f" password={credentials['password']}"
 
+    _remove_qsql_database()
     lib_vars.qgis_db_credentials = QSqlDatabase.addDatabase("QPSQL", lib_vars.plugin_name)
     lib_vars.qgis_db_credentials.setConnectOptions(
-        conn_string + f" connect_timeout={get_db_connect_timeout()}"
+        conn_string + f" connect_timeout={get_db_connect_timeout()} application_name={APP_NAME_QSQL}"
     )
     status = lib_vars.qgis_db_credentials.open()
     if not status:
@@ -938,6 +972,8 @@ def get_uri(tablename=None, geom=None, schema_name=None):
             uri.setConnection(
                 dao_db_credentials["host"], dao_db_credentials["port"], dao_db_credentials["db"], None, "", sslmode
             )
+    uri.setUseEstimatedMetadata(True)
+    uri.setParam("application_name", APP_NAME_LAYER)
     if geom is not None and geom != "None" and tablename is not None:
         geom_type = execute_returning(
             f"SELECT type FROM geometry_columns WHERE f_table_name = "

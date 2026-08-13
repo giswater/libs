@@ -940,25 +940,35 @@ def add_layer_from_query(
     else:
         querytext = f"({query})"
 
-    # Set the SQL query and the geometry column (initially without geom_column)
-    uri.setDataSource("", f"({query})", "", "", key_column)
+    has_geom = False
+    if geom_column and tools_db.dao is not None:
+        aux_conn = None
+        cursor = None
+        try:
+            aux_conn = tools_db.dao.get_aux_conn()
+            if aux_conn is None:
+                tools_log.log_error("Layer failed to load!", parameter="Could not open auxiliary connection")
+                return
+            cursor = tools_db.dao.get_cursor(aux_conn)
+            cursor.execute(f"SELECT * FROM {querytext} AS _gw_q LIMIT 0")
+            colnames = [d[0] for d in cursor.description] if cursor.description else []
+            has_geom = geom_column in colnames
+        except Exception as e:
+            tools_log.log_error("Layer failed to load!", parameter=str(e))
+            return
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            tools_db.dao.delete_aux_con(aux_conn)
 
-    # Create a provisional layer
-    provisional_layer = QgsVectorLayer(uri.uri(False), f"{layer_name}", "postgres")
-
-    # Check if the provisional layer is valid
-    if not provisional_layer.isValid():
-        msg = "Layer failed to load!"
-        tools_log.log_error(msg, parameter=querytext)
-        return
-
-    # Check if the geometry column exists in the provisional layer
-    fields = provisional_layer.fields()
-    if geom_column in fields.names():
-        # Update uri to include the geometry column
+    if has_geom:
         uri.setDataSource("", querytext, geom_column, "", key_column)
+    else:
+        uri.setDataSource("", querytext, "", "", key_column)
 
-    # Create the layer
     layer = QgsVectorLayer(uri.uri(False), f"{layer_name}", "postgres")
 
     # Check if the layer is valid
