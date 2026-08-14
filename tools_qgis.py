@@ -55,6 +55,9 @@ from qgis.core import (
     Qgis,
     NULL,
     QgsMapLayer,
+    QgsLayerTreeLayer,
+    QgsLayerTreeGroup,
+    QgsEditorWidgetSetup,
 )
 from qgis.utils import iface, plugin_paths, available_plugins, active_plugins
 
@@ -968,6 +971,106 @@ def move_layer_to_group(layer, group, sub_group=None, sub_sub_group=None):
     return True
 
 
+def ensure_layer_node_in_group(layer, group, sub_group=None, sub_sub_group=None):
+    """Keep @layer in the project by ensuring a TOC node exists under @group.
+
+    Does not remove other nodes (safe from willRemoveChildren).
+    """
+    if layer is None or not group:
+        return False
+    root = QgsProject.instance().layerTreeRoot()
+    if root is None:
+        return False
+
+    first_group, second_group, third_group = _create_group_structure(root, group, sub_group, sub_sub_group)
+    target = third_group or second_group or first_group
+    if target is None:
+        return False
+
+    for child in target.findLayers():
+        if child.layerId() == layer.id():
+            return True
+
+    node = root.findLayer(layer.id())
+    if node is None:
+        _add_layer_to_group(layer, first_group, second_group, third_group)
+        return True
+
+    clone = node.clone()
+    clone.setItemVisibilityChecked(False)
+    target.insertChildNode(0, clone)
+    return True
+
+
+def collect_tree_layers(tree_node):
+    """Return QgsMapLayer objects under a layer-tree node (layer or group)."""
+    layers = []
+    if tree_node is None:
+        return layers
+    if isinstance(tree_node, QgsLayerTreeLayer):
+        layer = tree_node.layer()
+        if layer is not None:
+            layers.append(layer)
+        return layers
+    if isinstance(tree_node, QgsLayerTreeGroup):
+        for child in tree_node.children():
+            layers.extend(collect_tree_layers(child))
+    return layers
+
+
+_vr_target_tables = set()
+
+
+def refresh_value_relation_target_tables(aux_conn=None, is_thread=False):
+    """Cache CFF ValueRelation lookup table names for layer_is_value_relation_target."""
+    global _vr_target_tables
+    rows = tools_db.get_rows(
+        "SELECT DISTINCT widgetcontrols::jsonb -> 'valueRelation' ->> 'layer' "
+        "FROM config_form_fields "
+        "WHERE widgetcontrols IS NOT NULL "
+        "AND widgetcontrols::jsonb ? 'valueRelation' "
+        "AND widgetcontrols::jsonb -> 'valueRelation' ->> 'layer' IS NOT NULL",
+        log_info=False, is_thread=is_thread, aux_conn=aux_conn
+    )
+    tables = set()
+    if rows:
+        for row in rows:
+            if not row or not row[0]:
+                continue
+            name = str(row[0]).strip()
+            tables.add(name)
+            if '.' in name:
+                tables.add(name.split('.')[-1])
+    _vr_target_tables = tables
+    return tables
+
+
+def rebind_value_relation_layer(old_layer_id, new_layer):
+    """Point every ValueRelation that used @old_layer_id at @new_layer."""
+    if not old_layer_id or new_layer is None:
+        return 0
+    new_id = str(new_layer.id())
+    old_id = str(old_layer_id)
+    if old_id == new_id:
+        return 0
+    rebound = 0
+    for other in QgsProject.instance().mapLayers().values():
+        if other is None:
+            continue
+        for i in range(other.fields().count()):
+            setup = other.editorWidgetSetup(i)
+            if setup is None or setup.type() != "ValueRelation":
+                continue
+            cfg = dict(setup.config())
+            if str(cfg.get("Layer")) != old_id:
+                continue
+            cfg["Layer"] = new_id
+            cfg["LayerName"] = new_layer.name()
+            other.setEditorWidgetSetup(i, QgsEditorWidgetSetup("ValueRelation", cfg))
+            rebound += 1
+    return rebound
+
+
 def layer_is_value_relation_target(layer):
     """Return True if any project layer's ValueRelation widget points at @layer."""
     if layer is None:
@@ -982,6 +1085,13 @@ def layer_is_value_relation_target(layer):
                 continue
             if setup.type() == "ValueRelation" and str(setup.config().get("Layer")) == layer_id:
                 return True
+
+    table = layer.customProperty("gw_id") or get_layer_source_table_name(layer) or ""
+    table = str(table).strip()
+    if not table:
+        return False
+    if table in _vr_target_tables or table.split('.')[-1] in _vr_target_tables:
+        return True
     return False
 
 
