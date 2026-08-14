@@ -51,6 +51,7 @@ from qgis.core import (
     QgsMapToPixel,
     QgsWkbTypes,
     QgsPrintLayout,
+    QgsDataSourceUri,
     Qgis,
     NULL,
     QgsMapLayer,
@@ -705,29 +706,26 @@ def get_layer_source_table_name(layer):
         return None
 
     provider = layer.providerType()
-    if provider in ["postgres", "gdal"]:
+    if provider == "postgres":
+        table = QgsDataSourceUri(layer.dataProvider().dataSourceUri()).table()
+        return table.lower() if table else None
+    if provider == "gdal":
         uri = layer.dataProvider().dataSourceUri().lower()
         pos_ini = uri.find("table=")
         total = len(uri)
         pos_end_schema = uri.rfind(".")
         pos_fi = uri.find('" ')
         if uri.find("pg:") != -1:
-            uri_table = uri[pos_ini + 6 : total]
-        elif pos_ini != -1 and pos_fi != -1:
-            uri_table = uri[pos_end_schema + 2 : pos_fi]
-        else:
-            uri_table = uri[pos_end_schema + 2 : total - 1]
-    elif provider == "ogr" and layer.source().split("|")[0].endswith(".gpkg"):
-        uri_table = ""
-        parts = layer.source().split("|")  # Split by the pipe character '|'
-        for part in parts:
+            return uri[pos_ini + 6 : total]
+        if pos_ini != -1 and pos_fi != -1:
+            return uri[pos_end_schema + 2 : pos_fi]
+        return uri[pos_end_schema + 2 : total - 1]
+    if provider == "ogr" and layer.source().split("|")[0].endswith(".gpkg"):
+        for part in layer.source().split("|"):
             if part.startswith("layername="):
-                uri_table = part.split("=")[1]
-                break
-    else:
-        uri_table = None
-
-    return uri_table
+                return part.split("=")[1]
+        return ""
+    return None
 
 
 def get_layer_schema(layer):
@@ -737,16 +735,8 @@ def get_layer_schema(layer):
     if layer.providerType() != "postgres":
         return None
 
-    table_schema = None
-    uri = layer.dataProvider().dataSourceUri().lower()
-
-    pos_ini = uri.find("table=")
-    pos_end_schema = uri.rfind(".")
-    pos_fi = uri.find('" ')
-    if pos_ini != -1 and pos_fi != -1:
-        table_schema = uri[pos_ini + 7 : pos_end_schema - 1]
-
-    return table_schema
+    schema = QgsDataSourceUri(layer.dataProvider().dataSourceUri()).schema()
+    return schema.lower() if schema else None
 
 
 def get_primary_key(layer=None):
@@ -852,11 +842,24 @@ def get_layer(
     return layer
 
 
+def _strip_ident(value):
+    if value in (None, ""):
+        return None
+    return str(value).replace('"', "").lower()
+
+
 def find_matching_layer(layers, tablename, schema_name):
+    want_table = _strip_ident(tablename)
+    want_schema = _strip_ident(schema_name)
+    if not want_table:
+        return None
     for cur_layer in layers:
-        uri_table = get_layer_source_table_name(cur_layer)
-        table_schema = get_layer_schema(cur_layer)
-        if uri_table is not None and uri_table == tablename and schema_name in ("", None, table_schema):
+        uri_table = _strip_ident(get_layer_source_table_name(cur_layer))
+        gw_id = _strip_ident(cur_layer.customProperty("gw_id") if cur_layer else None)
+        if uri_table != want_table and gw_id != want_table:
+            continue
+        table_schema = _strip_ident(get_layer_schema(cur_layer))
+        if want_schema in (None, "") or table_schema in (None, "") or want_schema == table_schema:
             return cur_layer
     return None
 
@@ -895,6 +898,91 @@ def add_layer_to_toc(
         third_group = find_toc_group(second_group, sub_sub_group) if second_group and sub_sub_group else None
 
     _add_layer_to_group(layer, first_group, second_group, third_group)
+
+
+def is_layer_under_group(layer, group_name):
+    """Return True if @layer's TOC node is under a group named @group_name.
+
+    Walks parents (works even if the group is hidden from the layer tree view).
+    """
+    if layer is None or not group_name:
+        return False
+    root = QgsProject.instance().layerTreeRoot()
+    if root is None:
+        return False
+    layer_id = layer.id()
+    node = root.findLayer(layer_id)
+    if node is not None:
+        parent = node.parent()
+        target = group_name.lower()
+        while parent is not None and parent != root:
+            if parent.name().lower() == target:
+                return True
+            parent = parent.parent()
+    group = find_toc_group(root, group_name)
+    if group is None:
+        return False
+    return any(child.layerId() == layer_id for child in group.findLayers())
+
+
+def set_layer_geometry_column(layer, the_geom, field_id=None):
+    """Rebind a postgres layer URI to @the_geom without changing layer.id() (keeps ValueRelation)."""
+    if layer is None or not the_geom or the_geom in ("None", "none"):
+        return False
+    if layer.providerType() != "postgres":
+        return False
+    if layer.isSpatial():
+        return True
+    uri = QgsDataSourceUri(layer.dataProvider().dataSourceUri())
+    uri.setDataSource(uri.schema(), uri.table(), the_geom, uri.sql() or None, field_id or uri.keyColumn())
+    ok = layer.setDataSource(uri.uri(False), layer.name(), "postgres")
+    layer.triggerRepaint()
+    return bool(ok)
+
+
+def move_layer_to_group(layer, group, sub_group=None, sub_sub_group=None):
+    """Move an existing TOC node for @layer into @group/@sub_group. Same QgsMapLayer id.
+
+    Insert the clone first. Removing the last tree node makes QgsProject drop the layer.
+    """
+    if layer is None or not group:
+        return False
+    root = QgsProject.instance().layerTreeRoot()
+    if root is None:
+        return False
+    node = root.findLayer(layer.id())
+    if node is None:
+        return False
+
+    first_group, second_group, third_group = _create_group_structure(root, group, sub_group, sub_sub_group)
+    target = third_group or second_group or first_group
+    if target is None:
+        return False
+    if node.parent() == target:
+        return True
+
+    parent = node.parent()
+    clone = node.clone()
+    target.insertChildNode(0, clone)
+    parent.removeChildNode(node)
+    return True
+
+
+def layer_is_value_relation_target(layer):
+    """Return True if any project layer's ValueRelation widget points at @layer."""
+    if layer is None:
+        return False
+    layer_id = str(layer.id())
+    for other in QgsProject.instance().mapLayers().values():
+        if other is None:
+            continue
+        for i in range(other.fields().count()):
+            setup = other.editorWidgetSetup(i)
+            if setup is None:
+                continue
+            if setup.type() == "ValueRelation" and str(setup.config().get("Layer")) == layer_id:
+                return True
+    return False
 
 
 def hide_node_from_treeview(node, root, ltv):
