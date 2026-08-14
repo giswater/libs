@@ -1055,7 +1055,7 @@ def rebind_value_relation_layer(old_layer_id, new_layer):
         return 0
     rebound = 0
     for other in QgsProject.instance().mapLayers().values():
-        if other is None:
+        if other is None or not isinstance(other, QgsVectorLayer):
             continue
         for i in range(other.fields().count()):
             setup = other.editorWidgetSetup(i)
@@ -1077,7 +1077,7 @@ def layer_is_value_relation_target(layer):
         return False
     layer_id = str(layer.id())
     for other in QgsProject.instance().mapLayers().values():
-        if other is None:
+        if other is None or not isinstance(other, QgsVectorLayer):
             continue
         for i in range(other.fields().count()):
             setup = other.editorWidgetSetup(i)
