@@ -856,6 +856,7 @@ def find_matching_layer(layers, tablename, schema_name):
     want_schema = _strip_ident(schema_name)
     if not want_table:
         return None
+    fallback = None
     for cur_layer in layers:
         uri_table = _strip_ident(get_layer_source_table_name(cur_layer))
         gw_id = _strip_ident(cur_layer.customProperty("gw_id") if cur_layer else None)
@@ -863,8 +864,11 @@ def find_matching_layer(layers, tablename, schema_name):
             continue
         table_schema = _strip_ident(get_layer_schema(cur_layer))
         if want_schema in (None, "") or table_schema in (None, "") or want_schema == table_schema:
-            return cur_layer
-    return None
+            if cur_layer.isValid():
+                return cur_layer
+            if fallback is None:
+                fallback = cur_layer
+    return fallback
 
 
 def add_layer_to_toc(
