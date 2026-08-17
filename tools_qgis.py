@@ -1039,8 +1039,8 @@ def refresh_value_relation_target_tables(aux_conn=None, is_thread=False):
                 continue
             name = str(row[0]).strip()
             tables.add(name)
-            if '.' in name:
-                tables.add(name.split('.')[-1])
+            if "." in name:
+                tables.add(name.split(".")[-1])
     _vr_target_tables = tables
     return tables
 
@@ -1090,7 +1090,7 @@ def layer_is_value_relation_target(layer):
     table = str(table).strip()
     if not table:
         return False
-    if table in _vr_target_tables or table.split('.')[-1] in _vr_target_tables:
+    if table in _vr_target_tables or table.split(".")[-1] in _vr_target_tables:
         return True
     return False
 
