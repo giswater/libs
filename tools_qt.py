@@ -1101,7 +1101,8 @@ def fill_table(
 
     # Check for errors
     if model.lastError().isValid():
-        if "Unable to find table" in model.lastError().text():
+        msg = "Unable to find table"
+        if msg in model.lastError().text() or tr(msg) in model.lastError().text():
             tools_db.reset_qsqldatabase_connection()
         else:
             msg = "Fill table"
