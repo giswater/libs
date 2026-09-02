@@ -6,86 +6,86 @@ or (at your option) any later version.
 
 # -*- coding: utf-8 -*-
 import inspect
-import os
 import operator
-import sys
+import os
 import subprocess
+import sys
 import traceback
-from typing import Dict, Literal, Optional, Any, Union, List
 import webbrowser
-from functools import partial
 from encodings.aliases import aliases
-from warnings import warn
-from qgis.PyQt.sip import isdeleted
+from functools import partial
 from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Union
+from warnings import warn
+
+from qgis.core import QgsExpression
+from qgis.gui import QgsDateTimeEdit
 from qgis.PyQt.QtCore import (
+    QCoreApplication,
     QDate,
     QDateTime,
+    QLocale,
+    QPersistentModelIndex,
+    QRegularExpression,
     QSortFilterProxyModel,
     QStringListModel,
-    QTime,
     Qt,
-    QRegularExpression,
-    pyqtSignal,
-    QPersistentModelIndex,
-    QCoreApplication,
+    QTime,
     QTranslator,
-    QLocale,
+    pyqtSignal,
 )
 from qgis.PyQt.QtGui import (
-    QPixmap,
     QDoubleValidator,
-    QTextDocument,
-    QTextCharFormat,
     QFont,
     QIcon,
+    QPalette,
+    QPixmap,
     QRegularExpressionValidator,
     QStandardItem,
     QStandardItemModel,
+    QTextCharFormat,
     QTextCursor,
-    QPalette,
+    QTextDocument,
 )
 from qgis.PyQt.QtSql import QSqlTableModel
 from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
     QAction,
     QApplication,
-    QLineEdit,
-    QComboBox,
-    QWidget,
-    QDoubleSpinBox,
     QCheckBox,
-    QLabel,
-    QTextEdit,
-    QDateEdit,
-    QAbstractItemView,
+    QComboBox,
     QCompleter,
+    QDateEdit,
     QDateTimeEdit,
-    QTableView,
-    QSpinBox,
-    QTimeEdit,
-    QPushButton,
+    QDialog,
+    QDoubleSpinBox,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QRadioButton,
     QSizePolicy,
     QSpacerItem,
-    QFileDialog,
-    QGroupBox,
-    QMessageBox,
+    QSpinBox,
+    QTableView,
     QTabWidget,
+    QTextBrowser,
+    QTextEdit,
+    QTimeEdit,
     QToolBox,
     QToolButton,
-    QDialog,
-    QGridLayout,
-    QTextBrowser,
-    QHeaderView,
-    QListWidget,
+    QWidget,
 )
-from qgis.core import QgsExpression
-from qgis.gui import QgsDateTimeEdit
+from qgis.PyQt.sip import isdeleted
 from qgis.utils import iface
 
-from . import tools_log, tools_os, tools_qgis, tools_db
-from . import lib_vars
+from . import lib_vars, tools_db, tools_log, tools_os, tools_qgis
 from .ui.ui_manager import ShowInfoUi
 
 translator = QTranslator()
@@ -210,9 +210,9 @@ class GwEditDialog(QDialog):
         elif widget_type == "QComboBox":
             self.widget = QComboBox(self)
             if options:
-                try:
+                if isinstance(options[0], str):
                     self.widget.addItems(options)
-                except Exception:
+                else:
                     fill_combo_values(self.widget, options)
         elif widget_type == "QCheckBox":
             self.widget = QCheckBox(self)
@@ -617,6 +617,17 @@ def filter_by_list(combobox, proxy_model, text):
         combobox.completer().popup().hide()
 
 
+def _combo_item_elem(combo, row_index):
+    """Return combo row data, including custom-model async combos."""
+    elem = combo.itemData(row_index)
+    if elem is None and getattr(combo, "_gw_is_async_combo", False):
+        model = combo.model()
+        if model is not None:
+            model_index = model.index(row_index, 0)
+            elem = model.data(model_index, Qt.ItemDataRole.UserRole)
+    return elem
+
+
 def get_combo_value(dialog, widget, index=0, add_quote=False):
     """Get item data of current index of the @widget"""
     value = -1
@@ -624,15 +635,22 @@ def get_combo_value(dialog, widget, index=0, add_quote=False):
         value = ""
     if type(widget) is str:
         widget = dialog.findChild(QWidget, widget)
-    if widget:
-        if isinstance(widget, QComboBox):
-            current_index = widget.currentIndex()
-            elem = widget.itemData(current_index)
-            if index == -1:
-                return elem
-            value = elem[index]
-            if add_quote:
-                value = _handle_null_text(value, True, False)
+    if not widget or not isinstance(widget, QComboBox):
+        return value
+
+    current_index = widget.currentIndex()
+    if current_index < 0:
+        return value
+
+    elem = _combo_item_elem(widget, current_index)
+    if index == -1:
+        return elem
+    if elem is None:
+        return value
+
+    value = elem[index]
+    if add_quote:
+        value = _handle_null_text(value, True, False)
 
     return value
 
@@ -646,8 +664,18 @@ def set_combo_value(combo, value, index, add_new=True):
     """
     if combo is None:
         return False
+
+    # Async combos load in a background task. Duck-type `_gw_is_async_combo` /
+    # `set_pending_selection` so libs stays independent from core.
+    if getattr(combo, "_gw_is_async_combo", False) and not combo.property("rows_loaded"):
+        try:
+            combo.set_pending_selection(value, index)
+        except AttributeError:
+            pass
+        return True
+
     for i in range(0, combo.count()):
-        elem = combo.itemData(i)
+        elem = _combo_item_elem(combo, i)
         if elem is not None and str(value) == str(elem[index]):
             combo.setCurrentIndex(i)
             return True
@@ -717,6 +745,26 @@ def fill_combo_values(  # noqa: C901
             pass
         if add_empty:
             records_sorted.insert(0, ["", ""])
+
+        if getattr(combo, "_gw_is_async_combo", False) and hasattr(combo, "apply_rows"):
+            combo.blockSignals(True)
+            try:
+                rows = []
+                for record in records_sorted:
+                    if not record:
+                        continue
+                    row_id = "" if record[0] is None else str(record[0])
+                    if index_to_show < len(record):
+                        idval = str(record[index_to_show])
+                    else:
+                        idval = row_id
+                    rows.append((row_id, idval))
+                combo.apply_rows(rows)
+            finally:
+                combo.blockSignals(False)
+            if None not in (selected_id, index_to_compare):
+                set_combo_value(combo, selected_id, index_to_compare)
+            return
 
         for record in records_sorted:
             combo.addItem(str(record[index_to_show]), record)
