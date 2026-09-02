@@ -43,6 +43,7 @@ from qgis.PyQt.QtGui import (
     QStandardItem,
     QStandardItemModel,
     QTextCursor,
+    QPalette,
 )
 from qgis.PyQt.QtSql import QSqlTableModel
 from qgis.PyQt.QtWidgets import (
@@ -95,6 +96,50 @@ dlg_info = ShowInfoUi()
 RESIZE_CONTENTS_PRECISION = 25
 
 
+def _is_dark_palette(widget=None):
+    app = QApplication.instance()
+    if app is None:
+        return False
+    palette = widget.palette() if widget is not None else app.palette()
+    window_color = palette.color(QPalette.ColorRole.Window)
+    text_color = palette.color(QPalette.ColorRole.WindowText)
+    return window_color.lightness() < text_color.lightness()
+
+
+def _palette_link_color(widget, visited=False):
+    link = widget.palette().color(QPalette.ColorRole.Link)
+    if visited:
+        link = link.darker(120)
+    return link.name()
+
+
+def _readonly_field_style(widget):
+    if sys.platform == "darwin" and not _is_dark_palette(widget):
+        return None
+    palette = widget.palette()
+    base = palette.color(QPalette.ColorRole.Base)
+    bg = base.darker(104).name() if not _is_dark_palette(widget) else base.lighter(150).name()
+    text = palette.color(QPalette.ColorRole.Text).name()
+    selector = widget.__class__.__name__
+    return f"{selector} {{ background: {bg}; color: {text}; }}"
+
+
+def _hyperlink_label_style(widget, visited=False):
+    color = _palette_link_color(widget, visited)
+    return f"QLabel {{ color: {color}; text-decoration: underline; }}"
+
+
+def _hyperlink_lineedit_style(widget, visited=False, readonly=False):
+    color = _palette_link_color(widget, visited)
+    if readonly:
+        style = _readonly_field_style(widget)
+        if style:
+            return (f"QLineEdit {{ background: {widget.palette().color(QPalette.ColorRole.Base).darker(104).name()}; "
+                    f"color: {color}; text-decoration: underline; border: none; }}")
+        return f"QLineEdit {{ color: {color}; text-decoration: underline; }}"
+    return f"QLineEdit {{ color: {color}; text-decoration: underline; }}"
+
+
 class GwExtendedQLabel(QLabel):
     clicked = pyqtSignal()
 
@@ -110,11 +155,11 @@ class GwHyperLinkLabel(QLabel):
 
     def __init__(self):
         QLabel.__init__(self)
-        self.setStyleSheet("QLabel{color:blue; text-decoration: underline;}")
+        self.setStyleSheet(_hyperlink_label_style(self))
 
     def mouseReleaseEvent(self, ev):  # noqa: N802
         self.clicked.emit()
-        self.setStyleSheet("QLabel{color:purple; text-decoration: underline;}")
+        self.setStyleSheet(_hyperlink_label_style(self, visited=True))
 
 
 class GwHyperLinkLineEdit(QLineEdit):
@@ -122,14 +167,12 @@ class GwHyperLinkLineEdit(QLineEdit):
 
     def __init__(self):
         QLabel.__init__(self)
-        self.setStyleSheet("QLineEdit{color:blue; text-decoration: underline;}")
+        self.setStyleSheet(_hyperlink_lineedit_style(self))
 
     def mouseReleaseEvent(self, ev):  # noqa: N802
         if self.isReadOnly():
             self.clicked.emit()
-            self.setStyleSheet(
-                "QLineEdit { background: rgb(242, 242, 242); color:purple; text-decoration: underline; border: none;}"
-            )  # noqa: E501
+            self.setStyleSheet(_hyperlink_lineedit_style(self, visited=True, readonly=True))
 
 
 class GwEditDialog(QDialog):
@@ -767,7 +810,8 @@ def enable_dialog(dialog, enable, ignore_widgets=None):
                 if enable:
                     widget.setStyleSheet(None)
                 else:
-                    widget.setStyleSheet("QWidget { background: rgb(242, 242, 242); color: rgb(100, 100, 100)}")
+                    style = _readonly_field_style(widget)
+                    widget.setStyleSheet(style if style else None)
             elif isinstance(widget, (QComboBox, QCheckBox, QPushButton, QgsDateTimeEdit, QTableView)):
                 widget.setEnabled(enable)
 
