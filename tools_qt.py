@@ -114,7 +114,7 @@ def _palette_link_color(widget, visited=False):
 
 
 def _readonly_field_style(widget):
-    if sys.platform == 'darwin' and not _is_dark_palette(widget):
+    if sys.platform == "darwin" and not _is_dark_palette(widget):
         return None
     palette = widget.palette()
     base = palette.color(QPalette.ColorRole.Base)
