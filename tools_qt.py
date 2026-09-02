@@ -90,6 +90,10 @@ from .ui.ui_manager import ShowInfoUi
 translator = QTranslator()
 dlg_info = ShowInfoUi()
 
+# Number of rows sampled by QHeaderView to compute column widths on automatic resize modes.
+# Qt samples 1000 rows by default, which is too expensive on tables with many rows and columns
+RESIZE_CONTENTS_PRECISION = 25
+
 
 class GwExtendedQLabel(QLabel):
     clicked = pyqtSignal()
@@ -170,7 +174,9 @@ class GwEditDialog(QDialog):
         elif widget_type == "QCheckBox":
             self.widget = QCheckBox(self)
         else:
-            raise ValueError("Unsupported widget type")
+            msg = "Unsupported widget type: {0}"
+            msg_params = (widget_type,)
+            raise ValueError(tr(msg, list_params=msg_params))
 
         self.layout.addWidget(self.widget, 1, 0, 1, 2)
 
@@ -822,13 +828,19 @@ def set_tableview_config(
     stretch_last_section=True,
     sorting_enabled=True,
     selection_mode=QAbstractItemView.SelectionMode.ExtendedSelection,
+    resize_contents_precision=RESIZE_CONTENTS_PRECISION,
 ):
     """Set QTableView configurations"""
+    header = widget.horizontalHeader()
     widget.setSelectionBehavior(selection)
     widget.setSelectionMode(selection_mode)
-    widget.horizontalHeader().setSectionResizeMode(section_resize_mode)
-    widget.horizontalHeader().setStretchLastSection(stretch_last_section)
-    widget.horizontalHeader().setMinimumSectionSize(100)
+    # An automatic resize mode measures the cells of every row to size each column, and it does so
+    # again on every model or header change. Sampling a few rows keeps big tables responsive
+    if section_resize_mode in (QHeaderView.ResizeMode.ResizeToContents, QHeaderView.ResizeMode.Stretch):
+        header.setResizeContentsPrecision(resize_contents_precision)
+    header.setSectionResizeMode(section_resize_mode)
+    header.setStretchLastSection(stretch_last_section)
+    header.setMinimumSectionSize(100)
     widget.setEditTriggers(edit_triggers)
     widget.setSortingEnabled(sorting_enabled)
 
@@ -1137,7 +1149,8 @@ def fill_table(
 
     # Check for errors
     if model.lastError().isValid():
-        if "Unable to find table" in model.lastError().text():
+        msg = "Unable to find table"
+        if msg in model.lastError().text() or tr(msg) in model.lastError().text():
             tools_db.reset_qsqldatabase_connection()
         else:
             msg = "Fill table"
@@ -1709,19 +1722,12 @@ def set_stylesheet(widget, style="border: 2px solid red"):
     widget.setStyleSheet(style)
 
 
-def _translate_line(line, context_name, aux_context):
-    """Translate a single line with fallback to aux_context."""
-    translated = QCoreApplication.translate(context_name, line)
-    if translated == line:
-        translated = QCoreApplication.translate(aux_context, line)
+def _translate_text(text, context_name, aux_context):
+    """Translate text as one unit (including embedded newlines) with aux_context fallback."""
+    translated = QCoreApplication.translate(context_name, text)
+    if translated == text:
+        translated = QCoreApplication.translate(aux_context, text)
     return translated
-
-
-def _translate_multiline(str_message, context_name, aux_context):
-    """Translate a multiline string by translating each line separately."""
-    lines = str_message.split("\n")
-    translated_lines = [_translate_line(line, context_name, aux_context) for line in lines]
-    return "\n".join(translated_lines)
 
 
 def _format_params(value, list_params):
@@ -1737,18 +1743,18 @@ def _format_params(value, list_params):
 
 
 def tr(message, context_name="giswater", aux_context="ui_message", default=None, list_params=None):
-    """Translate @message looking it in @context_name"""
+    """Translate @message looking it in @context_name.
+
+    The full string is one translation key, including any embedded newlines.
+    """
     if context_name is None:
         context_name = lib_vars.plugin_name
 
     str_message = str(message)
-    if "\n" in str_message:
-        value = _translate_multiline(str_message, context_name, aux_context)
-    else:
-        value = _translate_line(str_message, context_name, aux_context)
+    value = _translate_text(str_message, context_name, aux_context)
 
     if value == str_message and default is not None:
-        value = default
+        value = tr(default)
 
     return _format_params(value, list_params)
 
@@ -2006,18 +2012,12 @@ def _add_translator(log_info=False):
                 tools_log.log_info(msg, parameter=locale_path)
             return
 
-    if os.path.exists(locale_path):
-        translator.load(locale_path)
-        QCoreApplication.installTranslator(translator)
-        if log_info:
-            msg = "Add translator ({0})"
-            msg_params = (locale,)
-            tools_log.log_info(msg, parameter=locale_path, msg_params=msg_params)
-    else:
-        if log_info:
-            msg = "Locale not found ({0})"
-            msg_params = (locale,)
-            tools_log.log_info(msg, parameter=locale_path, msg_params=msg_params)
+    translator.load(locale_path)
+    QCoreApplication.installTranslator(translator)
+    if log_info:
+        msg = "Add translator ({0})"
+        msg_params = (locale,)
+        tools_log.log_info(msg, parameter=locale_path, msg_params=msg_params)
 
 
 def _translate_form(context_name, dialog, aux_context="ui_message"):

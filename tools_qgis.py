@@ -51,9 +51,13 @@ from qgis.core import (
     QgsMapToPixel,
     QgsWkbTypes,
     QgsPrintLayout,
+    QgsDataSourceUri,
     Qgis,
     NULL,
     QgsMapLayer,
+    QgsLayerTreeLayer,
+    QgsLayerTreeGroup,
+    QgsEditorWidgetSetup,
 )
 from qgis.utils import iface, plugin_paths, available_plugins, active_plugins
 
@@ -705,29 +709,26 @@ def get_layer_source_table_name(layer):
         return None
 
     provider = layer.providerType()
-    if provider in ["postgres", "gdal"]:
+    if provider == "postgres":
+        table = QgsDataSourceUri(layer.dataProvider().dataSourceUri()).table()
+        return table.lower() if table else None
+    if provider == "gdal":
         uri = layer.dataProvider().dataSourceUri().lower()
         pos_ini = uri.find("table=")
         total = len(uri)
         pos_end_schema = uri.rfind(".")
         pos_fi = uri.find('" ')
         if uri.find("pg:") != -1:
-            uri_table = uri[pos_ini + 6 : total]
-        elif pos_ini != -1 and pos_fi != -1:
-            uri_table = uri[pos_end_schema + 2 : pos_fi]
-        else:
-            uri_table = uri[pos_end_schema + 2 : total - 1]
-    elif provider == "ogr" and layer.source().split("|")[0].endswith(".gpkg"):
-        uri_table = ""
-        parts = layer.source().split("|")  # Split by the pipe character '|'
-        for part in parts:
+            return uri[pos_ini + 6 : total]
+        if pos_ini != -1 and pos_fi != -1:
+            return uri[pos_end_schema + 2 : pos_fi]
+        return uri[pos_end_schema + 2 : total - 1]
+    if provider == "ogr" and layer.source().split("|")[0].endswith(".gpkg"):
+        for part in layer.source().split("|"):
             if part.startswith("layername="):
-                uri_table = part.split("=")[1]
-                break
-    else:
-        uri_table = None
-
-    return uri_table
+                return part.split("=")[1]
+        return ""
+    return None
 
 
 def get_layer_schema(layer):
@@ -737,16 +738,8 @@ def get_layer_schema(layer):
     if layer.providerType() != "postgres":
         return None
 
-    table_schema = None
-    uri = layer.dataProvider().dataSourceUri().lower()
-
-    pos_ini = uri.find("table=")
-    pos_end_schema = uri.rfind(".")
-    pos_fi = uri.find('" ')
-    if pos_ini != -1 and pos_fi != -1:
-        table_schema = uri[pos_ini + 7 : pos_end_schema - 1]
-
-    return table_schema
+    schema = QgsDataSourceUri(layer.dataProvider().dataSourceUri()).schema()
+    return schema.lower() if schema else None
 
 
 def get_primary_key(layer=None):
@@ -852,13 +845,30 @@ def get_layer(
     return layer
 
 
+def _strip_ident(value):
+    if value in (None, ""):
+        return None
+    return str(value).replace('"', "").lower()
+
+
 def find_matching_layer(layers, tablename, schema_name):
+    want_table = _strip_ident(tablename)
+    want_schema = _strip_ident(schema_name)
+    if not want_table:
+        return None
+    fallback = None
     for cur_layer in layers:
-        uri_table = get_layer_source_table_name(cur_layer)
-        table_schema = get_layer_schema(cur_layer)
-        if uri_table is not None and uri_table == tablename and schema_name in ("", None, table_schema):
-            return cur_layer
-    return None
+        uri_table = _strip_ident(get_layer_source_table_name(cur_layer))
+        gw_id = _strip_ident(cur_layer.customProperty("gw_id") if cur_layer else None)
+        if uri_table != want_table and gw_id != want_table:
+            continue
+        table_schema = _strip_ident(get_layer_schema(cur_layer))
+        if want_schema in (None, "") or table_schema in (None, "") or want_schema == table_schema:
+            if cur_layer.isValid():
+                return cur_layer
+            if fallback is None:
+                fallback = cur_layer
+    return fallback
 
 
 def add_layer_to_toc(
@@ -895,6 +905,198 @@ def add_layer_to_toc(
         third_group = find_toc_group(second_group, sub_sub_group) if second_group and sub_sub_group else None
 
     _add_layer_to_group(layer, first_group, second_group, third_group)
+
+
+def is_layer_under_group(layer, group_name):
+    """Return True if @layer's TOC node is under a group named @group_name.
+
+    Walks parents (works even if the group is hidden from the layer tree view).
+    """
+    if layer is None or not group_name:
+        return False
+    root = QgsProject.instance().layerTreeRoot()
+    if root is None:
+        return False
+    layer_id = layer.id()
+    node = root.findLayer(layer_id)
+    if node is not None:
+        parent = node.parent()
+        target = group_name.lower()
+        while parent is not None and parent != root:
+            if parent.name().lower() == target:
+                return True
+            parent = parent.parent()
+    group = find_toc_group(root, group_name)
+    if group is None:
+        return False
+    return any(child.layerId() == layer_id for child in group.findLayers())
+
+
+def set_layer_geometry_column(layer, the_geom, field_id=None):
+    """Rebind a postgres layer URI to @the_geom without changing layer.id() (keeps ValueRelation)."""
+    if layer is None or not the_geom or the_geom in ("None", "none"):
+        return False
+    if layer.providerType() != "postgres":
+        return False
+    if layer.isSpatial():
+        return True
+    uri = QgsDataSourceUri(layer.dataProvider().dataSourceUri())
+    uri.setDataSource(uri.schema(), uri.table(), the_geom, uri.sql() or None, field_id or uri.keyColumn())
+    ok = layer.setDataSource(uri.uri(False), layer.name(), "postgres")
+    layer.triggerRepaint()
+    return bool(ok)
+
+
+def move_layer_to_group(layer, group, sub_group=None, sub_sub_group=None):
+    """Move an existing TOC node for @layer into @group/@sub_group. Same QgsMapLayer id.
+
+    Insert the clone first. Removing the last tree node makes QgsProject drop the layer.
+    """
+    if layer is None or not group:
+        return False
+    root = QgsProject.instance().layerTreeRoot()
+    if root is None:
+        return False
+    node = root.findLayer(layer.id())
+    if node is None:
+        return False
+
+    first_group, second_group, third_group = _create_group_structure(root, group, sub_group, sub_sub_group)
+    target = third_group or second_group or first_group
+    if target is None:
+        return False
+    if node.parent() == target:
+        return True
+
+    parent = node.parent()
+    clone = node.clone()
+    target.insertChildNode(0, clone)
+    parent.removeChildNode(node)
+    return True
+
+
+def ensure_layer_node_in_group(layer, group, sub_group=None, sub_sub_group=None):
+    """Keep @layer in the project by ensuring a TOC node exists under @group.
+
+    Does not remove other nodes (safe from willRemoveChildren).
+    """
+    if layer is None or not group:
+        return False
+    root = QgsProject.instance().layerTreeRoot()
+    if root is None:
+        return False
+
+    first_group, second_group, third_group = _create_group_structure(root, group, sub_group, sub_sub_group)
+    target = third_group or second_group or first_group
+    if target is None:
+        return False
+
+    for child in target.findLayers():
+        if child.layerId() == layer.id():
+            return True
+
+    node = root.findLayer(layer.id())
+    if node is None:
+        _add_layer_to_group(layer, first_group, second_group, third_group)
+        return True
+
+    clone = node.clone()
+    clone.setItemVisibilityChecked(False)
+    target.insertChildNode(0, clone)
+    return True
+
+
+def collect_tree_layers(tree_node):
+    """Return QgsMapLayer objects under a layer-tree node (layer or group)."""
+    layers = []
+    if tree_node is None:
+        return layers
+    if isinstance(tree_node, QgsLayerTreeLayer):
+        layer = tree_node.layer()
+        if layer is not None:
+            layers.append(layer)
+        return layers
+    if isinstance(tree_node, QgsLayerTreeGroup):
+        for child in tree_node.children():
+            layers.extend(collect_tree_layers(child))
+    return layers
+
+
+_vr_target_tables = set()
+
+
+def refresh_value_relation_target_tables(aux_conn=None, is_thread=False):
+    """Cache CFF ValueRelation lookup table names for layer_is_value_relation_target."""
+    global _vr_target_tables
+    rows = tools_db.get_rows(
+        "SELECT DISTINCT widgetcontrols::jsonb -> 'valueRelation' ->> 'layer' "
+        "FROM config_form_fields "
+        "WHERE widgetcontrols IS NOT NULL "
+        "AND widgetcontrols::jsonb ? 'valueRelation' "
+        "AND widgetcontrols::jsonb -> 'valueRelation' ->> 'layer' IS NOT NULL",
+        log_info=False, is_thread=is_thread, aux_conn=aux_conn
+    )
+    tables = set()
+    if rows:
+        for row in rows:
+            if not row or not row[0]:
+                continue
+            name = str(row[0]).strip()
+            tables.add(name)
+            if "." in name:
+                tables.add(name.split(".")[-1])
+    _vr_target_tables = tables
+    return tables
+
+
+def rebind_value_relation_layer(old_layer_id, new_layer):
+    """Point every ValueRelation that used @old_layer_id at @new_layer."""
+    if not old_layer_id or new_layer is None:
+        return 0
+    new_id = str(new_layer.id())
+    old_id = str(old_layer_id)
+    if old_id == new_id:
+        return 0
+    rebound = 0
+    for other in QgsProject.instance().mapLayers().values():
+        if other is None or not isinstance(other, QgsVectorLayer):
+            continue
+        for i in range(other.fields().count()):
+            setup = other.editorWidgetSetup(i)
+            if setup is None or setup.type() != "ValueRelation":
+                continue
+            cfg = dict(setup.config())
+            if str(cfg.get("Layer")) != old_id:
+                continue
+            cfg["Layer"] = new_id
+            cfg["LayerName"] = new_layer.name()
+            other.setEditorWidgetSetup(i, QgsEditorWidgetSetup("ValueRelation", cfg))
+            rebound += 1
+    return rebound
+
+
+def layer_is_value_relation_target(layer):
+    """Return True if any project layer's ValueRelation widget points at @layer."""
+    if layer is None:
+        return False
+    layer_id = str(layer.id())
+    for other in QgsProject.instance().mapLayers().values():
+        if other is None or not isinstance(other, QgsVectorLayer):
+            continue
+        for i in range(other.fields().count()):
+            setup = other.editorWidgetSetup(i)
+            if setup is None:
+                continue
+            if setup.type() == "ValueRelation" and str(setup.config().get("Layer")) == layer_id:
+                return True
+
+    table = layer.customProperty("gw_id") or get_layer_source_table_name(layer) or ""
+    table = str(table).strip()
+    if not table:
+        return False
+    if table in _vr_target_tables or table.split(".")[-1] in _vr_target_tables:
+        return True
+    return False
 
 
 def hide_node_from_treeview(node, root, ltv):
@@ -940,25 +1142,35 @@ def add_layer_from_query(
     else:
         querytext = f"({query})"
 
-    # Set the SQL query and the geometry column (initially without geom_column)
-    uri.setDataSource("", f"({query})", "", "", key_column)
+    has_geom = False
+    if geom_column and tools_db.dao is not None:
+        aux_conn = None
+        cursor = None
+        try:
+            aux_conn = tools_db.dao.get_aux_conn()
+            if aux_conn is None:
+                tools_log.log_error("Layer failed to load!", parameter="Could not open auxiliary connection")
+                return
+            cursor = tools_db.dao.get_cursor(aux_conn)
+            cursor.execute(f"SELECT * FROM {querytext} AS _gw_q LIMIT 0")
+            colnames = [d[0] for d in cursor.description] if cursor.description else []
+            has_geom = geom_column in colnames
+        except Exception as e:
+            tools_log.log_error("Layer failed to load!", parameter=str(e))
+            return
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            tools_db.dao.delete_aux_con(aux_conn)
 
-    # Create a provisional layer
-    provisional_layer = QgsVectorLayer(uri.uri(False), f"{layer_name}", "postgres")
-
-    # Check if the provisional layer is valid
-    if not provisional_layer.isValid():
-        msg = "Layer failed to load!"
-        tools_log.log_error(msg, parameter=querytext)
-        return
-
-    # Check if the geometry column exists in the provisional layer
-    fields = provisional_layer.fields()
-    if geom_column in fields.names():
-        # Update uri to include the geometry column
+    if has_geom:
         uri.setDataSource("", querytext, geom_column, "", key_column)
+    else:
+        uri.setDataSource("", querytext, "", "", key_column)
 
-    # Create the layer
     layer = QgsVectorLayer(uri.uri(False), f"{layer_name}", "postgres")
 
     # Check if the layer is valid
@@ -1671,8 +1883,19 @@ def get_locale_schema():
     return locale
 
 
+def _locale_folder_from_lang_id(lang_id) -> Optional[str]:
+    """Map config_param_user id (ca_es) to QGIS locale (ca_ES)."""
+    text = str(lang_id or "").strip().replace("-", "_")
+    if not text or len(text) != 5:
+        return None
+    parts = text.split("_", 1)
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return f"{parts[0].lower()}_{parts[1].upper()}"
+    return text
+
+
 def get_ui_language_locale():
-    """Return UI language for Python .qm files from utils_language_ui when available."""
+    """Return UI language for Python .qm files from multilang user preference when set."""
     locale = None
     try:
         from . import tools_db
@@ -1680,24 +1903,15 @@ def get_ui_language_locale():
         schema_name = lib_vars.schema_name
         if schema_name:
             schema_name = schema_name.replace('"', "").strip()
-        param_table = None
-        if schema_name and tools_db.check_table("config_param_user", schemaname=schema_name):
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema_name):
-                param_table = f"{schema_name}.config_param_user"
-            else:
-                param_table = f'"{schema_name.replace(chr(34), chr(34) * 2)}".config_param_user'
-        if param_table and tools_db.check_schema("multilang"):
+        if schema_name and tools_db.check_schema("multilang"):
+            schema_esc = schema_name.replace("'", "''")
             row = tools_db.get_row(
-                f"SELECT value FROM {param_table} "
-                "WHERE parameter = 'utils_language_ui' AND cur_user = current_user",
+                f"SELECT value FROM {schema_esc}.config_param_user "
+                "WHERE parameter = 'multilang_language' AND cur_user = current_user",
                 log_info=False,
             )
-            if row and row[0]:
-                import json
-
-                data = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                if isinstance(data, dict) and data.get("lang") is not None and len(data.get("lang")) == 5:
-                    locale = data.get("lang")
+            if row and row[0] and str(row[0]).strip().lower() not in ("", "default"):
+                locale = _locale_folder_from_lang_id(row[0])
     except Exception as e:
         msg = "Error getting UI language locale: {0}"
         tools_log.log_info(msg, msg_params=(e,))
