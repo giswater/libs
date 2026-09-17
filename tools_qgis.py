@@ -1989,19 +1989,26 @@ def zoom_to_layer(layer):
 
 
 def check_query_layer(layer):
-    """Check for query layer and/or bad layer, if layer is a simple table, or an added layer from query, return False
+    """Return True if layer is a usable PostgreSQL table/view.
+
+    Query layers (DB Manager, Execute SQL, unique-values wrap, etc.) return False.
+    Postgres stores those as table="(SELECT ...)", which is the same signal
+    QgsPostgresProvider uses for mIsQuery. layer.isSqlQuery() is a no-op there
+    (QgsDataProvider default is False), and the old row_number()/_uid_ string
+    only matched DB Manager layers loaded with "column with unique values".
+
     :param layer: Layer to be checked (QgsVectorLayer)
     :return: True/False (Boolean)
     """
     try:
-        # TODO:: Find differences between PostgreSQL and query layers, and replace this if condition.
-        table_uri = layer.dataProvider().dataSourceUri()
-        if (
-            layer is None
-            or type(layer) is not QgsVectorLayer
-            or "SELECT row_number() over ()" in str(table_uri)
-            or layer.isSqlQuery()
-        ):
+        if layer is None or type(layer) is not QgsVectorLayer:
+            return False
+        provider = layer.dataProvider()
+        if provider is None or layer.isSqlQuery():
+            return False
+        # QgsPostgresProvider: mIsQuery = uri.table().startsWith('(')
+        table = (QgsDataSourceUri(provider.dataSourceUri()).table() or "").lstrip()
+        if table.startswith("("):
             return False
         return True
     except Exception:
