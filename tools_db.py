@@ -980,6 +980,7 @@ def get_uri(tablename=None, geom=None, schema_name=None):
             f"'{tablename}' AND f_table_schema = '{schema_name}' LIMIT 1;"
         )
         geom_type_map = {
+            "GEOMETRY": QgsWkbTypes.Type.Unknown,
             "POINT": QgsWkbTypes.Type.Point,
             "LINESTRING": QgsWkbTypes.Type.LineString,
             "POLYGON": QgsWkbTypes.Type.Polygon,
