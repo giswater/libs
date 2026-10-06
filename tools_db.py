@@ -14,6 +14,8 @@ from qgis.utils import iface
 from . import lib_vars
 from . import tools_log, tools_qt, tools_qgis, tools_pgdao, tools_os
 
+_libpq_quote = tools_pgdao._libpq_quote
+
 
 dao = None
 dao_db_credentials: dict[str, str] = None
@@ -51,16 +53,16 @@ def _credentials_conn_string(credentials, connect_timeout=None):
     service = credentials.get("service")
     if service:
         sslmode = credentials.get("sslmode")
-        conn_string = f"service={service}"
+        conn_string = f"service={_libpq_quote(service)}"
         if sslmode:
             conn_string += f" sslmode={sslmode}"
         # libpq does not see QgsCredentials; pass explicit auth when available
         user = credentials.get("user")
         password = credentials.get("password")
         if user not in (None, ""):
-            conn_string += f" user='{user}'"
+            conn_string += f" user={_libpq_quote(user)}"
         if password is not None:
-            conn_string += f" password={password}"
+            conn_string += f" password={_libpq_quote(password)}"
         return conn_string + timeout_part
 
     host = credentials.get("host") or "localhost"
@@ -69,11 +71,14 @@ def _credentials_conn_string(credentials, connect_timeout=None):
     user = credentials.get("user")
     password = credentials.get("password")
     sslmode = credentials.get("sslmode")
-    conn_string = f"host={host} port={port} dbname={db} user='{user}'"
+    conn_string = (
+        f"host={_libpq_quote(host)} port={port} dbname={_libpq_quote(db)} "
+        f"user={_libpq_quote(user)}"
+    )
     if sslmode:
         conn_string += f" sslmode={sslmode}"
     if password is not None:
-        conn_string += f" password={password}"
+        conn_string += f" password={_libpq_quote(password)}"
     return conn_string + timeout_part
 
 
@@ -538,7 +543,7 @@ def connect_to_database_service(service, sslmode=None, conn_info=None):
     """
     global dao
     close_plugin_db()
-    conn_string = f"service='{service}'"
+    conn_string = f"service={_libpq_quote(service)}"
     if sslmode:
         conn_string += f" sslmode={sslmode}"
 
@@ -575,9 +580,9 @@ def connect_to_database_service(service, sslmode=None, conn_info=None):
 
     # Fallback: connect using libpq service= resolution (may still need user/password)
     if credentials.get("user") not in (None, ""):
-        conn_string += f" user='{credentials['user']}'"
+        conn_string += f" user={_libpq_quote(credentials['user'])}"
     if credentials.get("password") is not None:
-        conn_string += f" password={credentials['password']}"
+        conn_string += f" password={_libpq_quote(credentials['password'])}"
 
     _remove_qsql_database()
     lib_vars.qgis_db_credentials = QSqlDatabase.addDatabase("QPSQL", lib_vars.plugin_name)

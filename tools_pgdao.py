@@ -10,6 +10,18 @@ import psycopg2.extras
 from psycopg2 import extensions as _pg_ext
 
 
+def _libpq_quote(value):
+    """Single-quote a libpq conninfo value.
+
+    libpq treats ``\\`` as an escape in quoted and unquoted values, so a password
+    such as ``t\\z0`` is delivered as ``tz0`` unless the backslash is doubled.
+    A single quote inside the value must be escaped the same way.
+    """
+    text = "" if value is None else str(value)
+    escaped = text.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 class GwPgDao(object):
     APP_NAME_DAO = "giswater-dao"
     APP_NAME_AUX = "giswater-aux"
@@ -104,11 +116,14 @@ class GwPgDao(object):
         self.dbname = dbname
         self.user = user
         self.password = password
-        self.conn_string = f"host={self.host} port={self.port} dbname={self.dbname} user='{self.user}'"
+        self.conn_string = (
+            f"host={_libpq_quote(self.host)} port={self.port} "
+            f"dbname={_libpq_quote(self.dbname)} user={_libpq_quote(self.user)}"
+        )
         if sslmode:
             self.conn_string += f" sslmode={sslmode}"
         if self.password is not None:
-            self.conn_string += f" password={self.password}"
+            self.conn_string += f" password={_libpq_quote(self.password)}"
         self._append_connect_options(connect_timeout)
 
     def set_conn_string(self, conn_string, connect_timeout=None):
@@ -118,7 +133,7 @@ class GwPgDao(object):
 
     def set_service(self, service, sslmode=None, connect_timeout=None):
         """Set service"""
-        self.conn_string = f"service={service}"
+        self.conn_string = f"service={_libpq_quote(service)}"
         if sslmode:
             self.conn_string += f" sslmode={sslmode}"
         self._append_connect_options(connect_timeout)
